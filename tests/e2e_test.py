@@ -314,7 +314,7 @@ async def main() -> int:
                 print("  ✔ bad connector key refused")
             skills_dir = tmp / "skills"
             cenv = {**os.environ, "BRIDGEBOT_API_KEY": conn_key, "BRIDGEBOT_SERVER_URL": base,
-                    "BRIDGEBOT_MACHINE_NAME": "e2e-pc", "BRIDGEBOT_SKILLS_DIR": str(skills_dir)}
+                    "BRIDGEBOT_MACHINE_NAME": "e2e-pc", "BRIDGEBOT_SKILLS_DIR": str(skills_dir), "BRIDGEBOT_AUTH_RETRY_S": "1"}
 
             def start_connector() -> subprocess.Popen:
                 p = subprocess.Popen([PY, str(ROOT / "connector" / "local_connector.py"), "--config", str(tmp / "none.json")],
@@ -500,7 +500,7 @@ async def main() -> int:
             check(not next(c for c in conns if c["id"] == cid)["online"], "suspension kicked the live connector")
             r = await http.patch(f"/api/admin/users/{uid}", headers=A, json={"status": "ACTIVE"})
             check(r.json()["user"]["status"] == "ACTIVE", "user reactivated")
-            await asyncio.sleep(4)  # daemon reconnects with backoff
+            await asyncio.sleep(5)  # daemon reconnects (auth-failure retry = 1 s in this test)
             conns = (await http.get("/api/admin/connectors", headers=A)).json()
             check(next(c for c in conns if c["id"] == cid)["online"], "connector auto-reconnected after reactivation")
             audit = (await http.get("/api/admin/audit", headers=A, params={"event_type": "ADMIN"})).json()

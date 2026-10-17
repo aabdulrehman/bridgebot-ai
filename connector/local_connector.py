@@ -20,13 +20,15 @@ Usage:
     # or put settings in connector_config.json / environment variables.
 
 Environment overrides: BRIDGEBOT_SERVER_URL, BRIDGEBOT_API_KEY, BRIDGEBOT_MACHINE_NAME,
-BRIDGEBOT_SKILLS_DIR, BRIDGEBOT_ALLOW_ANY_COMMAND (1/0), BRIDGEBOT_CONFIG.
+BRIDGEBOT_SKILLS_DIR, BRIDGEBOT_ALLOW_ANY_COMMAND (1/0), BRIDGEBOT_CONFIG,
+BRIDGEBOT_AUTH_RETRY_S, BRIDGEBOT_NO_TUNNELS, BRIDGEBOT_TUNNEL_PORTS.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import base64
+import collections
 import http.client
 import json
 import logging
@@ -55,7 +57,7 @@ except ImportError:  # pragma: no cover — legacy websockets < 13
 
     _HEADER_KW = "extra_headers"
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 IS_WINDOWS = os.name == "nt"
 log = logging.getLogger("bridgebot.connector")
 
@@ -67,6 +69,9 @@ DEFAULT_ALLOWED: List[str] = [
     "df", "free", "nvidia-smi", "ollama", "n8n", "git", "ping", "docker", "ps",
 ]
 WINDOWS_BUILTINS = {"echo", "dir", "type", "ver"}
+# Task/skill events survive a network drop: they are queued while offline and flushed after reconnect.
+RELIABLE_TYPES = {"TASK_STARTED", "LOG", "TASK_RESULT", "SKILL_ACK"}
+OUTBOX_MAX = 20000
 
 
 # =============================================================================
@@ -82,11 +87,15 @@ class ConnectorConfig:
     heartbeat_interval_s: float = 20.0
     reconnect_base_s: float = 1.0
     reconnect_max_s: float = 60.0
+    auth_retry_s: float = 60.0           # wait after "invalid API key" / "account suspended" (doubles, max 4x)
+    ws_ping_interval_s: float = 20.0     # WebSocket ping; a dead link is detected within interval + timeout
+    ws_ping_timeout_s: float = 20.0
     allowed_commands: List[str] = field(default_factory=lambda: list(DEFAULT_ALLOWED))
     allow_any_command: bool = False
     max_concurrent_tasks: int = 4
     max_output_lines: int = 5000
     max_line_chars: int = 4000
+    unbuffered_children: bool = True     # PYTHONUNBUFFERED=1 etc. so child output streams line-by-line
     default_timeout_s: int = 120
     work_dir: str = "."
     skills_dir: str = "./skills"
@@ -148,6 +157,8 @@ def load_config(argv: Optional[List[str]] = None) -> ConnectorConfig:
     for env, attr in env_map.items():
         if os.getenv(env):
             setattr(cfg, attr, os.environ[env])
+    if os.getenv("BRIDGEBOT_AUTH_RETRY_S"):
+        cfg.auth_retry_s = float(os.environ["BRIDGEBOT_AUTH_RETRY_S"])
     if os.getenv("BRIDGEBOT_ALLOW_ANY_COMMAND", "").lower() in ("1", "true", "yes"):
         cfg.allow_any_command = True
 
@@ -191,15 +202,37 @@ class LocalConnector:
         self._jobs: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
         self._tunnel_slots = asyncio.Semaphore(cfg.max_concurrent_tunnel_requests)
+        self._welcomed = False
+        self._outbox: "collections.deque[Dict[str, Any]]" = collections.deque(maxlen=OUTBOX_MAX)
+        self._flush_lock = asyncio.Lock()
+        self._server_heartbeat_timeout_s = 90.0
 
     # ------------------------------------------------------------------ transport
     async def send(self, message: Dict[str, Any]) -> bool:
-        """Serialise and send; returns False if the socket is gone."""
+        """Send a message. Task/skill events are queued (bounded) while offline and delivered in order on reconnect."""
+        if message.get("type") in RELIABLE_TYPES:
+            self._outbox.append(message)
+            return await self._flush()
+        return await self._raw_send(message)
+
+    async def _flush(self) -> bool:
         if self.ws is None:
+            return False
+        async with self._flush_lock:
+            while self._outbox:
+                if not await self._raw_send(self._outbox[0]):
+                    return False
+                self._outbox.popleft()
+        return True
+
+    async def _raw_send(self, message: Dict[str, Any]) -> bool:
+        """Serialise and send; returns False if the socket is gone."""
+        ws = self.ws
+        if ws is None:
             return False
         try:
             async with self._send_lock:
-                await self.ws.send(json.dumps(message, default=str))
+                await ws.send(json.dumps(message, default=str))
             return True
         except websockets.ConnectionClosed:
             return False
@@ -208,37 +241,68 @@ class LocalConnector:
             return False
 
     async def run_forever(self) -> None:
-        """Connect / reconnect loop with exponential backoff + jitter."""
+        """Connect / reconnect loop with exponential backoff + jitter.
+
+        * backoff only resets after the cloud sent WELCOME (a socket that is accepted then closed counts as a failure),
+        * auth failures (invalid/rotated key, deleted connector, suspended account) are logged once with a fix hint
+          and retried slowly (auth_retry_s, doubling up to 4x) instead of hammering the server,
+        * "replaced by a newer session" (same key running twice) backs off 30 s+ so two copies don't ping-pong.
+        """
         attempt = 0
+        auth_failures = 0
         url = self.cfg.ws_url
         headers = {"Authorization": f"Bearer {self.cfg.api_key}", "User-Agent": f"bridgebot-connector/{VERSION}"}
         while not self._stop.is_set():
+            kind, detail = "network", ""
+            self._welcomed = False
             try:
                 log.info("connecting to %s ...", url)
-                async with ws_connect(url, **{_HEADER_KW: headers}, ping_interval=20, ping_timeout=20,
-                                      max_size=32 * 1024 * 1024, open_timeout=30) as ws:
+                async with ws_connect(url, **{_HEADER_KW: headers}, ping_interval=self.cfg.ws_ping_interval_s,
+                                      ping_timeout=self.cfg.ws_ping_timeout_s, max_size=32 * 1024 * 1024,
+                                      open_timeout=30, close_timeout=5) as ws:
                     self.ws = ws
-                    attempt = 0  # reset backoff after a successful handshake
                     await self._on_open()
-                    heartbeat = asyncio.create_task(self._heartbeat_loop())
+                    heartbeat = asyncio.create_task(self._heartbeat_loop(ws))
                     try:
                         async for raw in ws:
                             await self._dispatch(raw)
+                    except websockets.ConnectionClosed:
+                        pass
                     finally:
                         heartbeat.cancel()
                         self.ws = None
-                    log.warning("connection closed (code=%s reason=%s)", ws.close_code, ws.close_reason)
+                    kind, detail = _classify_close(ws.close_code, ws.close_reason or "")
+                    if self._welcomed:
+                        attempt = 0
+                        auth_failures = 0
+                    log.warning("connection closed (code=%s reason=%s)", ws.close_code, ws.close_reason or "-")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 — network errors, 403 bad key, DNS, ...
-                log.error("connection error: %s", exc)
+            except Exception as exc:  # noqa: BLE001 — network errors, DNS, TLS, HTTP 403 from old servers, ...
                 self.ws = None
+                code = getattr(getattr(exc, "response", None), "status_code", None)
+                if code in (401, 403):
+                    kind, detail = "auth", f"HTTP {code}"
+                else:
+                    log.error("connection error: %s: %s", type(exc).__name__, exc)
             if self._stop.is_set():
                 break
-            delay = min(self.cfg.reconnect_max_s, self.cfg.reconnect_base_s * (2 ** attempt))
-            delay = delay * (0.8 + random.random() * 0.4)
-            attempt = min(attempt + 1, 16)
-            log.info("reconnecting in %.1fs (attempt %d)", delay, attempt)
+            if kind == "auth":
+                auth_failures += 1
+                delay = min(self.cfg.auth_retry_s * (2 ** (auth_failures - 1)), self.cfg.auth_retry_s * 4)
+                hint = ("your BridgeBot account is not active — contact support (WhatsApp +966 56 700 9846)"
+                        if "account" in detail.lower() else
+                        "copy a fresh API key from Dashboard → Control Room (Regenerate key) into --api-key / BRIDGEBOT_API_KEY")
+                log.error("❌ the cloud refused this connector: %s. Fix: %s. Retrying in %.0fs.", detail, hint, delay)
+            else:
+                auth_failures = 0
+                delay = min(self.cfg.reconnect_max_s, self.cfg.reconnect_base_s * (2 ** attempt))
+                delay = delay * (0.8 + random.random() * 0.4)
+                if kind == "replaced":
+                    delay = max(delay, 30.0)
+                    log.warning("another connector process is using this API key (newest wins). Retrying in %.0fs.", delay)
+                attempt = min(attempt + 1, 16)
+                log.info("reconnecting in %.1fs (attempt %d)", delay, attempt)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=delay)
             except asyncio.TimeoutError:
@@ -253,7 +317,7 @@ class LocalConnector:
             await self.ws.close()
 
     async def _on_open(self) -> None:
-        await self.send({
+        await self._raw_send({
             "type": "HELLO",
             "machine": self.cfg.machine_name,
             "version": VERSION,
@@ -262,12 +326,27 @@ class LocalConnector:
             "allowed_commands": "*" if self.cfg.allow_any_command else self.cfg.allowed_commands,
             "features": ["tasks", "skills"] + (["tunnel"] if self.cfg.tunnels_enabled else []),
         })
+        if self._outbox:
+            log.info("delivering %d queued task events from while offline", len(self._outbox))
+            await self._flush()
 
-    async def _heartbeat_loop(self) -> None:
-        """Application-level PING so the cloud updates last_heartbeat."""
+    async def _heartbeat_loop(self, ws: Any) -> None:
+        """Application-level PING (updates last_heartbeat in the cloud) + sleep/wake detection.
+
+        If the wall clock jumped (laptop slept, process was SIGSTOPped) for longer than half the cloud's heartbeat
+        timeout, the socket is almost certainly stale: drop it now and reconnect instead of waiting for ping timeouts.
+        """
+        last = time.time()
         while True:
             await asyncio.sleep(self.cfg.heartbeat_interval_s)
-            if not await self.send({"type": "PING", "ts": time.time()}):
+            now = time.time()
+            gap = now - last - self.cfg.heartbeat_interval_s
+            last = now
+            if gap > self._server_heartbeat_timeout_s / 2:
+                log.warning("⏰ woke up after %.0fs of sleep/suspend — reconnecting", gap)
+                await ws.close(code=1001, reason="wake from sleep")
+                return
+            if not await self.send({"type": "PING", "ts": now}):
                 return
 
     # ------------------------------------------------------------------ dispatch
@@ -279,6 +358,11 @@ class LocalConnector:
             log.warning("ignoring malformed message")
             return
         if mtype == "WELCOME":
+            self._welcomed = True
+            try:
+                self._server_heartbeat_timeout_s = float(msg.get("heartbeat_timeout_s") or 90)
+            except (TypeError, ValueError):
+                pass
             log.info("✅ authenticated as connector %s (%s)", msg.get("connector_id"), msg.get("machine_name"))
         elif mtype == "PONG":
             log.debug("pong")
@@ -343,9 +427,13 @@ class LocalConnector:
             exit_code: Optional[int] = None
             error: Optional[str] = None
             try:
+                env = dict(os.environ)
+                if self.cfg.unbuffered_children:
+                    env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING=env.get("PYTHONIOENCODING", "utf-8"))
                 proc = await asyncio.create_subprocess_exec(
-                    *argv, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
+                    *argv, cwd=cwd, stdin=asyncio.subprocess.DEVNULL, env=env,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    **({} if IS_WINDOWS else {"start_new_session": True}),  # own process group → kill children too
                 )
                 self._procs[task_id] = proc
                 counter = {"n": 0}
@@ -367,7 +455,13 @@ class LocalConnector:
                 error = f"{type(exc).__name__}: {exc}"
                 exit_code = -1
             finally:
-                self._procs.pop(task_id, None)
+                p_ = self._procs.pop(task_id, None)
+                if p_ is not None and p_.returncode is None:   # never leave an orphan running
+                    _kill(p_)
+                    try:
+                        await asyncio.wait_for(p_.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        pass
             if error:
                 await self.send({"type": "LOG", "task_id": task_id, "stream": "stderr", "line": f"[connector] {error}", "ts": time.time()})
             await self.send({
@@ -382,16 +476,17 @@ class LocalConnector:
         """Forward each output line as a LOG event, with caps on volume."""
         if reader is None:
             return
-        while True:
-            line_b = await reader.readline()
-            if not line_b:
-                return
+        async for line_b in _iter_lines(reader, self.cfg.max_line_chars * 4):
             counter["n"] += 1
             if counter["n"] > self.cfg.max_output_lines:
                 if counter["n"] == self.cfg.max_output_lines + 1:
-                    await self.send({"type": "LOG", "task_id": task_id, "stream": "stderr", "line": "[connector] output truncated", "ts": time.time()})
+                    await self.send({"type": "LOG", "task_id": task_id, "stream": "stderr", "ts": time.time(),
+                                     "line": f"[connector] output truncated: more than {self.cfg.max_output_lines} lines "
+                                             "(max_output_lines); the task keeps running, further lines are dropped"})
                 continue
-            line = line_b.decode("utf-8", errors="replace").rstrip("\r\n")[: self.cfg.max_line_chars]
+            line = line_b.decode("utf-8", errors="replace").rstrip("\r\n")
+            if len(line) > self.cfg.max_line_chars:
+                line = line[: self.cfg.max_line_chars] + " …[line truncated]"
             if stream == "stdout":
                 tail.append(line)
                 del tail[:-50]
@@ -506,11 +601,62 @@ def _safe_name(name: str) -> str:
 
 
 def _kill(proc: asyncio.subprocess.Process) -> None:
+    """Kill a task and everything it spawned (its process group on POSIX)."""
     try:
         if proc.returncode is None:
+            if not IS_WINDOWS:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    return
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
             proc.kill()
     except ProcessLookupError:
         pass
+
+
+async def _iter_lines(reader: asyncio.StreamReader, max_line_bytes: int):  # type: ignore[no-untyped-def]
+    """Yield lines as soon as they arrive. Unlike readline() this never fails on very long lines: a line longer
+    than max_line_bytes is yielded in pieces (the caller truncates it for display)."""
+    buf = b""
+    while True:
+        chunk = await reader.read(65536)
+        if not chunk:
+            if buf:
+                yield buf
+            return
+        buf += chunk
+        while True:
+            i = buf.find(b"\n")
+            if i < 0:
+                break
+            yield buf[: i + 1]
+            buf = buf[i + 1:]
+        if len(buf) > max_line_bytes:
+            yield buf[:max_line_bytes]
+            buf = b""
+            # skip the remainder of this overlong line
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk:
+                    return
+                i = chunk.find(b"\n")
+                if i >= 0:
+                    buf = chunk[i + 1:]
+                    break
+            while b"\n" in buf:
+                i = buf.find(b"\n")
+                yield buf[: i + 1]
+                buf = buf[i + 1:]
+
+
+def _classify_close(code: Optional[int], reason: str) -> "tuple[str, str]":
+    """Map a WebSocket close code from the cloud to a reconnect policy."""
+    if code in (4001, 4002, 4003, 4401, 4403, 1008):
+        return "auth", f"{reason or 'unauthorized'} (code {code})"
+    if code == 4000:
+        return "replaced", reason
+    return "network", reason
 
 
 def _post_json(url: str, data: Dict[str, Any]) -> int:

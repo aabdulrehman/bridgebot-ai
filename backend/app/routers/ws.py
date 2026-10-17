@@ -105,17 +105,22 @@ async def _record_skill(connector_id: uuid.UUID, msg: Dict[str, Any]) -> None:
 async def connector_ws(ws: WebSocket) -> None:
     """Persistent tunnel for a local connector daemon."""
     raw_key = _extract_api_key(ws)
-    if not raw_key:
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing API key")
-        return
-    async with SessionLocal() as db:
-        conn = await db.scalar(select(Connector).where(Connector.api_key_hash == hash_api_key(raw_key)))
-        owner = await db.get(User, conn.user_id) if conn else None
-    if conn is None or owner is None:
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid API key")
-        return
-    if owner.status != "ACTIVE":
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"Account {owner.status.lower()}")
+    conn = owner = None
+    if raw_key:
+        async with SessionLocal() as db:
+            conn = await db.scalar(select(Connector).where(Connector.api_key_hash == hash_api_key(raw_key)))
+            owner = await db.get(User, conn.user_id) if conn else None
+    # Auth failures: accept, then close with an explicit 44xx code + reason so the connector can show a clear
+    # error and back off for minutes (a pre-accept close only surfaces as a bare "HTTP 403").
+    if conn is None or owner is None or owner.status != "ACTIVE":
+        if not raw_key:
+            code, reason = 4401, "Missing API key"
+        elif conn is None or owner is None:
+            code, reason = 4401, "Invalid API key - regenerate it in the dashboard"
+        else:
+            code, reason = 4403, f"Account {owner.status.lower()}"
+        await ws.accept()
+        await ws.close(code=code, reason=reason)
         return
 
     await ws.accept()
