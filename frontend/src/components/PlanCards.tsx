@@ -46,6 +46,7 @@ export default function PlanCards({ detailed = false }: { detailed?: boolean }) 
                 <dt>Tasks/day</dt><dd className="text-right text-slate-200">{limit(p.max_tasks_per_day)}</dd>
                 <dt>Webhooks</dt><dd className="text-right text-slate-200">{limit(p.max_webhooks)}</dd>
                 <dt>API keys</dt><dd className="text-right text-slate-200">{limit(p.max_api_keys)}</dd>
+                <dt>Linked bots</dt><dd className="text-right text-slate-200">{limit(p.max_bots ?? 1)}</dd>
                 <dt>Inbound webhook</dt><dd className="text-right text-slate-200">{p.inbound_webhooks ? "✓" : "—"}</dd>
               </dl>
             )}

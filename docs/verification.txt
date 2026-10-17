@@ -184,3 +184,7 @@ checks passed: 116
 ✔ approve button
 ✔ user upgraded to PRO by admin: PRO
 ✔ no page errors 
+
+## Live site (https://bridgebot-ai.onrender.com) — 2026-10-17 18:56 +03
+All 25 checked pages/endpoints returned 200 (/, /pricing/, /marketplace/, /marketplace/group/, /docs/*, /login/, /dashboard/, /bots/, /train/, /webhooks/, /api-keys/, /billing/, /admin/, /api/plans, /api/public-config, /api/marketplace, /healthz, /downloads/local_connector.py, /downloads/bridgebot_sdk.py).
+Live flow with test account livetest_c310e9@example.com: register → FREE · link poll bot · bridgebot_sdk.py (--exec) running on a separate box · make-master Customer Support Master → GRADUATED in seconds · SKILL.md written · Business master → 402.

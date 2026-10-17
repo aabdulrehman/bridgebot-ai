@@ -59,6 +59,7 @@ export interface Plan {
   max_tasks_per_day: number;
   max_webhooks: number;
   max_api_keys: number;
+  max_bots?: number;
   training_access: boolean;
   inbound_webhooks: boolean;
   features_json: string[];

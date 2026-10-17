@@ -39,6 +39,7 @@ class PlanOut(BaseModel):
     max_tasks_per_day: int
     max_webhooks: int
     max_api_keys: int
+    max_bots: int = 1
     training_access: bool
     inbound_webhooks: bool
     features_json: Any
