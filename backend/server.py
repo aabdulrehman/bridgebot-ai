@@ -84,15 +84,20 @@ async def healthz(db: int = 0) -> Dict[str, object]:
 
         from sqlalchemy import text as _text
 
-        from app.database import SessionLocal
+        from app.database import engine
         try:
+            pool_before = engine.pool.status()
             t0 = _t.perf_counter()
-            async with SessionLocal() as s:
-                await s.execute(_text("SELECT 1"))
+            async with engine.connect() as c:
                 t1 = _t.perf_counter()
-                await s.execute(_text("SELECT 1"))
+                await c.execute(_text("SELECT 1"))
                 t2 = _t.perf_counter()
-            out["db"] = {"ok": True, "first_query_ms": round((t1 - t0) * 1000, 1), "roundtrip_ms": round((t2 - t1) * 1000, 1),
+                await c.execute(_text("SELECT 1"))
+                t3 = _t.perf_counter()
+            t4 = _t.perf_counter()
+            ms = lambda a, b: round((b - a) * 1000, 1)  # noqa: E731
+            out["db"] = {"ok": True, "checkout_ms": ms(t0, t1), "first_query_ms": ms(t1, t2), "roundtrip_ms": ms(t2, t3),
+                         "release_ms": ms(t3, t4), "pool_before": pool_before, "pool_after": engine.pool.status(),
                          "dialect": "sqlite" if settings.is_sqlite else "postgresql"}
         except Exception as exc:  # noqa: BLE001
             out["db"] = {"ok": False, "error": type(exc).__name__}
