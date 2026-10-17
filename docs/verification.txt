@@ -183,3 +183,19 @@ bb_empty: 144 checks — ✅ ALL E2E CHECKS PASSED
 ✅ master bot tests passed
 
 ## UI smoke (headless Chrome, tests/ui_saas_smoke.js): 29 checks passed incl. tunnel created in UI serving a real python http.server page
+
+## LIVE https://bridgebot-ai.onrender.com (commit cf4a46e, 2026-10-17 19:24 Asia/Riyadh)
+box connector v1.1.0 + real local http.server on 127.0.0.1:18777, tunnel https://bridgebot-ai.onrender.com/t/f668bf4ee2/
+PASS registered livetunnel_874698@example.com
+PASS tunnel created, online=True
+PASS 2nd tunnel on Free → 402
+PASS GET path+query verbatim (/hello/w%C3%B6rld?x=1&y=two%20words), custom header + X-Forwarded-For forwarded
+PASS POST JSON through live tunnel
+PASS binary POST round-trip 400000 bytes byte-exact
+PASS binary GET 524288 bytes byte-exact
+PASS token protection: 401 without, 200 with X-Tunnel-Token
+PASS unknown slug → 404
+PASS local server stopped → 502 page ("nothing is listening")
+PASS connector stopped → 502 "Tunnel offline" page
+PASS stats: 6 requests, in 400014 B, out 924540 B
+RESULT 12 / 12
