@@ -36,9 +36,36 @@ else:
 engine = create_async_engine(
     settings.database_url,
     connect_args=_connect_args,
-    pool_pre_ping=not settings.is_sqlite,
+    # SQLAlchemy's pool_pre_ping costs BEGIN+ping+ROLLBACK (≈4 round-trips ≈ 0.5 s to a remote Supabase) on EVERY
+    # checkout. Instead we ping only connections that sat idle for a while (see _ping_if_idle) and recycle old ones.
+    pool_pre_ping=False,
+    pool_recycle=600 if not settings.is_sqlite else -1,
     future=True,
 )
+IDLE_PING_AFTER_S = 30.0
+
+
+if not settings.is_sqlite:
+    import time as _time
+
+    from sqlalchemy import event, exc
+
+    @event.listens_for(engine.sync_engine, "checkin")
+    def _mark_idle(dbapi_conn, record) -> None:  # type: ignore[no-untyped-def]
+        record.info["idle_since"] = _time.monotonic()
+
+    @event.listens_for(engine.sync_engine, "checkout")
+    def _ping_if_idle(dbapi_conn, record, proxy) -> None:  # type: ignore[no-untyped-def]
+        """Pessimistic disconnect check, but only for connections idle > IDLE_PING_AFTER_S (pooler may have dropped them)."""
+        since = record.info.get("idle_since")
+        if since is None or _time.monotonic() - since < IDLE_PING_AFTER_S:
+            return
+        try:
+            cur = dbapi_conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+        except Exception as err:  # noqa: BLE001
+            raise exc.DisconnectionError() from err  # the pool discards it and connects afresh
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
