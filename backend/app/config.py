@@ -7,7 +7,7 @@ Every setting has a zero-cost default so the backend runs locally with
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,6 +49,43 @@ class Settings(BaseSettings):
     # Static PWA export to serve at "/" (relative to backend/). Ignored if missing.
     frontend_dir: str = "../frontend/out"
 
+    # --- Admin bootstrap ------------------------------------------------------
+    # ONLY the account whose email equals ADMIN_EMAIL (case-insensitive) is admin.
+    # The role is re-derived on every authenticated request, so nobody else can
+    # ever hold it (there is no "first registered user becomes admin" fallback).
+    # If ADMIN_PASSWORD is also set, that account is created at startup when missing.
+    admin_email: str = "Abaudii12@gmail.com"
+    admin_password: str = ""
+
+    # --- Billing ----------------------------------------------------------------
+    # "manual" = request upgrade + admin approval (bank transfer, cash, etc.).
+    # Future: "stripe" / "paddle" (see app/billing/providers.py).
+    payment_provider: str = "manual"
+    # Support / sales WhatsApp (digits only, international format, no +).
+    support_whatsapp: str = "966567009846"
+    # PayPal.Me link (manual verification): users pay {paypal_me_url}/{amount}USD and submit the transaction id.
+    paypal_me_url: str = "https://paypal.me/BunnyOnMoney"
+    paypal_account_name: str = "Abdul Rehman Chohan"
+    manual_payment_instructions: str = (
+        "Pay with PayPal (paypal.me/BunnyOnMoney — Abdul Rehman Chohan) and submit the PayPal transaction ID / "
+        "your PayPal email here, or pay/confirm via WhatsApp (+966 56 700 9846). An admin verifies and approves "
+        "your upgrade — usually within a few hours."
+    )
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    paddle_api_key: str = ""
+    paddle_webhook_secret: str = ""
+    billing_period_days: int = 30
+
+    # --- Webhooks ---------------------------------------------------------------
+    # Outbound webhooks to private/loopback IPs are blocked in production (SSRF guard).
+    # None = allow only when ENVIRONMENT != production.
+    webhook_allow_private: Optional[bool] = None
+    webhook_max_attempts: int = 5
+    webhook_retry_base_s: float = 30.0   # backoff: base * 4^(attempt-1)
+    webhook_timeout_s: float = 10.0
+    public_base_url: str = ""          # e.g. https://bridgebot-ai.onrender.com (used in docs/examples)
+
     # --- Bridge ---------------------------------------------------------------
     heartbeat_timeout_s: int = 90           # close connector socket if silent this long
     default_task_timeout_s: int = 120
@@ -72,6 +109,19 @@ class Settings(BaseSettings):
     @property
     def fallback_model_list(self) -> List[str]:
         return [m.strip() for m in self.openrouter_fallback_models.split(",") if m.strip()]
+
+    @property
+    def admin_email_normalized(self) -> str:
+        return self.admin_email.strip().lower()
+
+    def is_admin_email(self, email: str) -> bool:
+        return bool(self.admin_email_normalized) and email.strip().lower() == self.admin_email_normalized
+
+    @property
+    def allow_private_webhooks(self) -> bool:
+        if self.webhook_allow_private is not None:
+            return self.webhook_allow_private
+        return self.environment.lower() != "production"
 
     @property
     def is_sqlite(self) -> bool:

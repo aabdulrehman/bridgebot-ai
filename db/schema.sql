@@ -11,6 +11,33 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- -----------------------------------------------------------------------------
+-- plans: subscription catalogue (backend upserts the rows from app/billing/plans.py
+-- on every start; -1 = unlimited, 0 = not included).
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS plans (
+    id                   VARCHAR(20) PRIMARY KEY,                -- FREE / PRO / BUSINESS
+    name                 VARCHAR(60) NOT NULL,
+    price_monthly_cents  INTEGER     NOT NULL DEFAULT 0 CHECK (price_monthly_cents >= 0),
+    currency             VARCHAR(3)  NOT NULL DEFAULT 'USD',
+    monthly_tokens       INTEGER     NOT NULL DEFAULT 0,
+    max_machines         INTEGER     NOT NULL DEFAULT 1,
+    max_tasks_per_day    INTEGER     NOT NULL DEFAULT 0,
+    max_webhooks         INTEGER     NOT NULL DEFAULT 0,
+    max_api_keys         INTEGER     NOT NULL DEFAULT 0,
+    training_access      BOOLEAN     NOT NULL DEFAULT TRUE,
+    inbound_webhooks     BOOLEAN     NOT NULL DEFAULT FALSE,
+    features_json        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    sort_order           INTEGER     NOT NULL DEFAULT 0,
+    is_active            BOOLEAN     NOT NULL DEFAULT TRUE
+);
+INSERT INTO plans (id, name, price_monthly_cents, currency, monthly_tokens, max_machines, max_tasks_per_day,
+                   max_webhooks, max_api_keys, training_access, inbound_webhooks, features_json, sort_order, is_active) VALUES
+    ('FREE',     'Free',        0, 'USD',   5000,  1,   50,  1,  1, TRUE, FALSE, '[]'::jsonb, 0, TRUE),
+    ('PRO',      'Pro',      1900, 'USD', 100000,  5, 1000, 10,  5, TRUE, TRUE,  '[]'::jsonb, 1, TRUE),
+    ('BUSINESS', 'Business', 7900, 'USD', 500000, 25,   -1, 50, 20, TRUE, TRUE,  '[]'::jsonb, 2, TRUE)
+ON CONFLICT (id) DO NOTHING;
+
+-- -----------------------------------------------------------------------------
 -- users: platform accounts. token_balance = platform credits used by Service 2.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
@@ -21,7 +48,32 @@ CREATE TABLE IF NOT EXISTS users (
                    CONSTRAINT users_token_balance_nonneg CHECK (token_balance >= 0),
     created_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
+-- Account + subscription columns (ADD COLUMN IF NOT EXISTS = safe upgrade of v1 databases).
+-- role is derived from ADMIN_EMAIL by the backend on every request.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role                 VARCHAR(10) NOT NULL DEFAULT 'user';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status               VARCHAR(10) NOT NULL DEFAULT 'ACTIVE';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan_id              VARCHAR(20) NOT NULL DEFAULT 'FREE' REFERENCES plans(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_status  VARCHAR(20) NOT NULL DEFAULT 'ACTIVE';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS current_period_end   TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tokens_used_period   INTEGER     NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tasks_today          INTEGER     NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tasks_day            VARCHAR(10);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS inbound_hook_token   VARCHAR(64) UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS billing_customer_ref VARCHAR(120);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at        TIMESTAMPTZ;
+DO $$ BEGIN
+    ALTER TABLE users ADD CONSTRAINT users_role_chk   CHECK (role IN ('user','admin'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE users ADD CONSTRAINT users_status_chk CHECK (status IN ('ACTIVE','SUSPENDED','BANNED'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE users ADD CONSTRAINT users_sub_status_chk CHECK (subscription_status IN ('ACTIVE','PENDING_UPGRADE','PAST_DUE','CANCELED'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (created_at);
+CREATE INDEX IF NOT EXISTS idx_users_plan_id    ON users (plan_id);
+CREATE INDEX IF NOT EXISTS ix_users_email       ON users (email);
 
 -- -----------------------------------------------------------------------------
 -- connectors: one row per local machine running local_connector.py.
@@ -113,6 +165,95 @@ CREATE INDEX IF NOT EXISTS idx_audit_connector_created ON audit_logs (connector_
 CREATE INDEX IF NOT EXISTS idx_audit_event_type        ON audit_logs (event_type);
 
 -- -----------------------------------------------------------------------------
+-- upgrade_requests: "request upgrade" flow → admin approval (or provider webhook).
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS upgrade_requests (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id            UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    from_plan_id       VARCHAR(20) NOT NULL REFERENCES plans(id),
+    requested_plan_id  VARCHAR(20) NOT NULL REFERENCES plans(id),
+    status             VARCHAR(10) NOT NULL DEFAULT 'PENDING'
+                       CONSTRAINT upgrade_status_chk CHECK (status IN ('PENDING','APPROVED','REJECTED','CANCELED')),
+    payment_provider   VARCHAR(20) NOT NULL DEFAULT 'manual',      -- manual | stripe | paddle
+    payment_reference  VARCHAR(200),
+    amount_cents       INTEGER     NOT NULL DEFAULT 0,
+    months             INTEGER     NOT NULL DEFAULT 1,
+    user_note          TEXT,
+    admin_note         TEXT,
+    decided_by         UUID        REFERENCES users(id) ON DELETE SET NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    decided_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_upgrade_requests_user_id ON upgrade_requests (user_id);
+CREATE INDEX IF NOT EXISTS idx_upgrade_status         ON upgrade_requests (status);
+
+-- -----------------------------------------------------------------------------
+-- payments: revenue ledger (manual approvals today; Stripe/Paddle later).
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS payments (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    plan_id             VARCHAR(20) NOT NULL REFERENCES plans(id),
+    upgrade_request_id  UUID        REFERENCES upgrade_requests(id) ON DELETE SET NULL,
+    amount_cents        INTEGER     NOT NULL DEFAULT 0,
+    currency            VARCHAR(3)  NOT NULL DEFAULT 'USD',
+    provider            VARCHAR(20) NOT NULL DEFAULT 'manual',
+    reference           VARCHAR(200),
+    status              VARCHAR(12) NOT NULL DEFAULT 'SUCCEEDED',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_payments_user_id    ON payments (user_id);
+CREATE INDEX IF NOT EXISTS ix_payments_created_at ON payments (created_at);
+
+-- -----------------------------------------------------------------------------
+-- api_keys: personal REST API keys (bbu_…); SHA-256 stored, raw shown once.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS api_keys (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name          VARCHAR(80) NOT NULL,
+    prefix        VARCHAR(16) NOT NULL,
+    key_hash      VARCHAR(64) NOT NULL UNIQUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at  TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_api_keys_user_id ON api_keys (user_id);
+
+-- -----------------------------------------------------------------------------
+-- webhooks + webhook_deliveries: outbound HMAC-signed events with retry log.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS webhooks (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID          NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    url          VARCHAR(1000) NOT NULL,
+    events_json  JSONB         NOT NULL DEFAULT '[]'::jsonb,
+    secret       VARCHAR(80)   NOT NULL,
+    description  VARCHAR(200),
+    is_active    BOOLEAN       NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_webhooks_user_id ON webhooks (user_id);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    webhook_id       UUID        NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    event            VARCHAR(50) NOT NULL,
+    payload_json     JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    status           VARCHAR(10) NOT NULL DEFAULT 'PENDING'
+                     CONSTRAINT delivery_status_chk CHECK (status IN ('PENDING','SUCCESS','FAILED')),
+    attempts         INTEGER     NOT NULL DEFAULT 0,
+    response_code    INTEGER,
+    response_body    TEXT,
+    error            TEXT,
+    next_attempt_at  TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    delivered_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_webhook_deliveries_webhook_id ON webhook_deliveries (webhook_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_pending             ON webhook_deliveries (status, next_attempt_at);
+
+-- -----------------------------------------------------------------------------
 -- Seed: built-in free master bot.
 -- -----------------------------------------------------------------------------
 INSERT INTO master_bots (bot_name, description, pricing_tier, skill_payload_json)
@@ -130,3 +271,9 @@ ALTER TABLE agents            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE master_bots       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE training_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE plans              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE upgrade_requests   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payments           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_keys           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhooks           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhook_deliveries ENABLE ROW LEVEL SECURITY;

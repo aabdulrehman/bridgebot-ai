@@ -7,6 +7,7 @@ Production:    uvicorn server:app --host 0.0.0.0 --port $PORT --workers 1
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -22,7 +23,8 @@ from app.config import get_settings
 from app.database import SessionLocal, init_db
 from app.hub import hub
 from app.models import Connector
-from app.routers import auth, connectors, tasks, training, ws
+from app import webhooks
+from app.routers import admin, apikeys, auth, billing, connectors, hooks, public, tasks, training, webhooks_api, ws
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridgebot")
@@ -38,9 +40,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await db.commit()
     if "CHANGE_ME" in settings.jwt_secret and settings.environment == "production":
         log.warning("JWT_SECRET is the default value — set a strong secret in production!")
-    log.info("BridgeBot AI backend ready (db=%s, llm=%s)", "sqlite" if settings.is_sqlite else "postgres",
-             "openrouter" if settings.openrouter_api_key else "template-fallback")
-    yield
+    log.info("BridgeBot AI backend ready (db=%s, llm=%s, admin=%s)", "sqlite" if settings.is_sqlite else "postgres",
+             "openrouter" if settings.openrouter_api_key else "template-fallback", settings.admin_email_normalized or "-")
+    stop = asyncio.Event()
+    worker = asyncio.create_task(webhooks.worker(stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.cancel()
 
 
 app = FastAPI(title="BridgeBot AI", version="1.0.0", lifespan=lifespan)
@@ -73,7 +81,13 @@ async def healthz() -> Dict[str, object]:
     return {"ok": True, "online_connectors": len(hub.connectors), "llm": bool(settings.openrouter_api_key)}
 
 
+app.include_router(public.router)
 app.include_router(auth.router)
+app.include_router(billing.router)
+app.include_router(apikeys.router)
+app.include_router(webhooks_api.router)
+app.include_router(hooks.router)
+app.include_router(admin.router)
 app.include_router(connectors.router)
 app.include_router(training.router)
 app.include_router(tasks.router)

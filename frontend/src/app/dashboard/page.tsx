@@ -144,7 +144,11 @@ export default function DashboardPage() {
         <div className="card"><p className="label">Hub</p><StatusDot online={socketState === "open"} label={socketState.toUpperCase()} /></div>
       </section>
 
-      {error && <p className="rounded-xl bg-red-950/50 p-3 text-sm text-red-300" onClick={() => setError(null)}>{error}</p>}
+      {error && (
+        <p className="rounded-xl bg-red-950/50 p-3 text-sm text-red-300" onClick={() => setError(null)}>
+          {error} {/plan|Upgrade/i.test(error) && <a href="/billing/" className="underline">Upgrade →</a>}
+        </p>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
         {/* ---- connectors column */}

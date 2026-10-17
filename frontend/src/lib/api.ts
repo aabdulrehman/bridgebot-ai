@@ -54,6 +54,7 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
   if (!res.ok) {
     if (res.status === 401 && typeof window !== "undefined" && !path.startsWith("/api/auth/")) {
       setToken(null);
+      localStorage.removeItem("bridgebot_me");
       window.location.href = "/login/";
     }
     const detail = (data as { detail?: unknown }).detail;

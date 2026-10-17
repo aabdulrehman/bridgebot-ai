@@ -26,6 +26,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import select
 from sqlalchemy.orm import attributes
 
+from .. import webhooks
 from ..audit import write_audit
 from ..config import get_settings
 from ..database import SessionLocal
@@ -109,8 +110,12 @@ async def connector_ws(ws: WebSocket) -> None:
         return
     async with SessionLocal() as db:
         conn = await db.scalar(select(Connector).where(Connector.api_key_hash == hash_api_key(raw_key)))
-    if conn is None:
+        owner = await db.get(User, conn.user_id) if conn else None
+    if conn is None or owner is None:
         await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid API key")
+        return
+    if owner.status != "ACTIVE":
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason=f"Account {owner.status.lower()}")
         return
 
     await ws.accept()
@@ -120,6 +125,7 @@ async def connector_ws(ws: WebSocket) -> None:
     await _set_status(connector_id, "ONLINE")
     await hub.broadcast_to_user(user_id, {"type": "CONNECTOR_STATUS", "connector_id": str(connector_id), "status": "ONLINE", "machine_name": conn.machine_name})
     await write_audit(connector_id, "CONNECTED", {"client": ws.client.host if ws.client else None})
+    await webhooks.emit(user_id, "connector.online", {"connector_id": str(connector_id), "machine_name": conn.machine_name})
     await ws.send_json({"type": "WELCOME", "connector_id": str(connector_id), "machine_name": conn.machine_name, "heartbeat_timeout_s": settings.heartbeat_timeout_s})
     log.info("connector %s (%s) online", conn.machine_name, connector_id)
 
@@ -148,6 +154,15 @@ async def connector_ws(ws: WebSocket) -> None:
                 await _upsert_agents(connector_id, msg.get("agents"))
             elif mtype == "SKILL_ACK":
                 await _record_skill(connector_id, msg)
+                if msg.get("ok"):
+                    await webhooks.emit(user_id, "skill.injected", {
+                        "connector_id": str(connector_id), "machine_name": conn.machine_name, "agent_name": msg.get("agent_name"),
+                        "skill_id": msg.get("skill_id"), "training_request_id": msg.get("request_id"), "path": msg.get("path")})
+            elif mtype == "TASK_RESULT":
+                await webhooks.emit(user_id, "task.completed", {
+                    "connector_id": str(connector_id), "machine_name": conn.machine_name, "task_id": msg.get("task_id"),
+                    "exit_code": msg.get("exit_code"), "duration_ms": msg.get("duration_ms"), "error": msg.get("error"),
+                    "stdout_tail": msg.get("stdout_tail", [])})
 
             # Relay everything else to the owner's dashboards.
             await hub.broadcast_to_user(user_id, {**msg, "type": mtype, "connector_id": str(connector_id)})
@@ -162,6 +177,7 @@ async def connector_ws(ws: WebSocket) -> None:
             await _set_status(connector_id, "OFFLINE", heartbeat=False)
             await hub.broadcast_to_user(user_id, {"type": "CONNECTOR_STATUS", "connector_id": str(connector_id), "status": "OFFLINE"})
             await write_audit(connector_id, "DISCONNECTED", {})
+            await webhooks.emit(user_id, "connector.offline", {"connector_id": str(connector_id), "machine_name": conn.machine_name})
             log.info("connector %s offline", connector_id)
 
 
@@ -175,8 +191,8 @@ async def dashboard_ws(ws: WebSocket) -> None:
     async with SessionLocal() as db:
         user = await db.get(User, user_id)
         conns = list(await db.scalars(select(Connector).where(Connector.user_id == user_id))) if user else []
-    if user is None:
-        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unknown user")
+    if user is None or user.status != "ACTIVE":
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unknown or inactive user")
         return
 
     await ws.accept()

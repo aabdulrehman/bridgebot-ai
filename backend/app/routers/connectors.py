@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..billing.service import enforce_machine_limit
 from ..database import get_db
 from ..deps import get_current_user
 from ..hub import hub
@@ -32,7 +33,8 @@ async def get_owned_connector(db: AsyncSession, user: User, connector_id: uuid.U
 
 @router.post("", response_model=ConnectorCreatedOut, status_code=status.HTTP_201_CREATED)
 async def create_connector(body: ConnectorCreateIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> ConnectorCreatedOut:
-    """Register a machine. The raw API key is returned ONLY in this response."""
+    """Register a machine (plan machine limit enforced). The raw API key is returned ONLY here."""
+    await enforce_machine_limit(db, user)
     raw_key = generate_api_key()
     conn = Connector(user_id=user.id, machine_name=body.machine_name.strip(), api_key_hash=hash_api_key(raw_key), status="OFFLINE")
     db.add(conn)

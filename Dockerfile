@@ -10,6 +10,8 @@ WORKDIR /fe
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
+# prebuild copies the connector into public/downloads (served at /downloads/…)
+COPY connector/ /connector/
 # Empty => the PWA talks to the origin that serves it (this container).
 ENV NEXT_PUBLIC_API_URL="" NEXT_TELEMETRY_DISABLED=1
 RUN rm -f .env.local && npm run build
@@ -23,6 +25,7 @@ COPY backend/requirements.txt ./
 RUN pip install -r requirements.txt
 COPY backend/ ./
 COPY --from=frontend /fe/out /app/frontend/out
+COPY connector/ /app/connector/
 RUN useradd -m -u 1000 app && mkdir -p /data && chown -R app /data /app
 USER app
 EXPOSE 8000

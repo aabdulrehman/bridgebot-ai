@@ -49,11 +49,106 @@ export interface TrainingRequest {
   approved_at: string | null;
 }
 
+export interface Plan {
+  id: "FREE" | "PRO" | "BUSINESS" | string;
+  name: string;
+  price_monthly_cents: number;
+  currency: string;
+  monthly_tokens: number;
+  max_machines: number;
+  max_tasks_per_day: number;
+  max_webhooks: number;
+  max_api_keys: number;
+  training_access: boolean;
+  inbound_webhooks: boolean;
+  features_json: string[];
+  sort_order: number;
+}
+
 export interface User {
   id: string;
   email: string;
   token_balance: number;
   created_at: string;
+  role: "user" | "admin";
+  status: "ACTIVE" | "SUSPENDED" | "BANNED";
+  plan_id: string;
+  subscription_status: "ACTIVE" | "PENDING_UPGRADE" | "PAST_DUE" | "CANCELED";
+  current_period_start: string | null;
+  current_period_end: string | null;
+  tokens_used_period: number;
+  last_login_at?: string | null;
+  plan?: Plan;
+}
+
+export interface Usage {
+  machines: number;
+  webhooks: number;
+  api_keys: number;
+  tasks_today: number;
+  tokens_used_period: number;
+  token_balance: number;
+}
+
+export interface UpgradeRequest {
+  id: string;
+  user_id: string;
+  from_plan_id: string;
+  requested_plan_id: string;
+  status: "PENDING" | "APPROVED" | "REJECTED" | "CANCELED";
+  payment_provider: string;
+  payment_reference: string | null;
+  amount_cents: number;
+  months: number;
+  user_note: string | null;
+  admin_note: string | null;
+  created_at: string;
+  decided_at: string | null;
+  user_email?: string | null;
+}
+
+export interface Subscription {
+  user: User;
+  plan: Plan;
+  usage: Usage;
+  pending_request: UpgradeRequest | null;
+  support_whatsapp: string;
+  whatsapp_url: string;
+}
+
+export interface ApiKey {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  api_key?: string;
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events_json: string[];
+  description: string | null;
+  is_active: boolean;
+  created_at: string;
+  secret: string;
+}
+
+export interface Delivery {
+  id: string;
+  webhook_id: string;
+  event: string;
+  status: "PENDING" | "SUCCESS" | "FAILED";
+  attempts: number;
+  response_code: number | null;
+  response_body: string | null;
+  error: string | null;
+  payload_json: unknown;
+  created_at: string;
+  delivered_at: string | null;
+  next_attempt_at: string | null;
 }
 
 /** Any event pushed over /ws/dashboard */

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import PwaRegister from "@/components/PwaRegister";
+import WhatsAppFab from "@/components/WhatsAppFab";
 
 export const metadata: Metadata = {
   title: "BridgeBot AI — Control Room",
@@ -23,6 +24,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body className="min-h-dvh antialiased">
         <PwaRegister />
         {children}
+        <WhatsAppFab />
       </body>
     </html>
   );

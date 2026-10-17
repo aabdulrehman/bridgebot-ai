@@ -1,11 +1,16 @@
 "use client";
 /** Login / Register screen. */
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { api, apiBase, setToken } from "@/lib/api";
+import { cacheMe } from "@/lib/site";
 
 interface TokenOut {
   access_token: string;
+  email: string;
+  role: string;
+  plan_id: string;
 }
 
 export default function LoginPage() {
@@ -15,6 +20,16 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [plan, setPlan] = useState<string | null>(null);
+  const [base, setBase] = useState("");
+
+  // ?mode=register&plan=PRO (read on the client: static export)
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("mode") === "register") setMode("register");
+    setPlan(q.get("plan"));
+    setBase(apiBase());
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -23,7 +38,9 @@ export default function LoginPage() {
     try {
       const res = await api<TokenOut>(`/api/auth/${mode}`, { method: "POST", json: { email, password } });
       setToken(res.access_token);
-      router.replace("/dashboard/");
+      cacheMe({ email: res.email, plan_id: res.plan_id, role: res.role });
+      if (plan && plan !== "FREE") router.replace(`/billing/?plan=${plan}`);
+      else router.replace(res.role === "admin" ? "/admin/" : "/dashboard/");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -36,7 +53,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/icon-192.png" alt="BridgeBot" className="mx-auto mb-3 h-16 w-16 rounded-2xl" />
+          <Link href="/"><img src="/icon-192.png" alt="BridgeBot" className="mx-auto mb-3 h-16 w-16 rounded-2xl" /></Link>
           <h1 className="text-2xl font-bold">BridgeBot <span className="text-emerald-400">AI</span></h1>
           <p className="mt-1 text-sm text-slate-400">Control your local AI agents from anywhere.</p>
         </div>
@@ -57,12 +74,13 @@ export default function LoginPage() {
             <label className="label" htmlFor="password">Password</label>
             <input id="password" className="input" type="password" minLength={8} required
               autoComplete={mode === "login" ? "current-password" : "new-password"} value={password} onChange={(e) => setPassword(e.target.value)} />
-            {mode === "register" && <p className="mt-1 text-xs text-slate-500">At least 8 characters. New accounts get free platform tokens.</p>}
+            {mode === "register" && <p className="mt-1 text-xs text-slate-500">At least 8 characters. New accounts start on the Free plan{plan && plan !== "FREE" ? ` — you can upgrade to ${plan} right after` : ""}.</p>}
           </div>
           {error && <p className="rounded-lg bg-red-950/50 p-2 text-sm text-red-300">{error}</p>}
           <button className="btn-primary w-full" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Login" : "Create account"}</button>
         </form>
-        <p className="text-center text-[11px] text-slate-600">API: {apiBase()}</p>
+        <p className="text-center text-xs text-slate-500"><Link href="/pricing/" className="hover:text-slate-300">Pricing</Link> · <Link href="/docs/" className="hover:text-slate-300">Docs</Link></p>
+        <p className="text-center text-[11px] text-slate-600">API: {base}</p>
       </div>
     </main>
   );

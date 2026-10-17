@@ -18,7 +18,8 @@ import jwt
 from .config import get_settings
 
 settings = get_settings()
-API_KEY_PREFIX = "bbk_"
+API_KEY_PREFIX = "bbk_"          # connector keys
+USER_API_KEY_PREFIX = "bbu_"     # personal REST API keys
 
 
 def hash_password(password: str) -> str:
@@ -63,3 +64,18 @@ def generate_api_key() -> str:
 def hash_api_key(raw_key: str) -> str:
     """SHA-256 hex digest used for storage and lookup."""
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def generate_user_api_key() -> str:
+    """Personal REST API key (shown once)."""
+    return USER_API_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+def generate_hook_token() -> str:
+    """Unguessable token for the per-user inbound webhook URL."""
+    return secrets.token_urlsafe(32)
+
+
+def generate_webhook_secret() -> str:
+    """HMAC signing secret for outbound webhooks."""
+    return "whsec_" + secrets.token_urlsafe(32)

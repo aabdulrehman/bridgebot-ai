@@ -10,7 +10,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import webhooks
 from ..audit import write_audit
+from ..billing.service import require_training
 from ..config import get_settings
 from ..database import SessionLocal, get_db
 from ..deps import get_current_user
@@ -40,6 +42,7 @@ async def _run_training(request_id: uuid.UUID, business_name: Optional[str], goa
             charged = min(cost, user.token_balance) if user else 0
             if user:
                 user.token_balance -= charged
+                user.tokens_used_period = (user.tokens_used_period or 0) + charged
             tr.generated_payload_json = payload
             tr.generator = generator
             tr.token_cost = charged
@@ -55,6 +58,10 @@ async def _run_training(request_id: uuid.UUID, business_name: Optional[str], goa
                 await db.commit()
         if tr:
             await hub.broadcast_to_user(tr.user_id, {"type": "TRAINING_STATUS", "training_request_id": str(tr.id), "status": tr.status})
+            if tr.status == "READY":
+                await webhooks.emit(tr.user_id, "training.ready", {
+                    "training_request_id": str(tr.id), "skill_id": (tr.generated_payload_json or {}).get("skill_id"),
+                    "name": (tr.generated_payload_json or {}).get("name"), "token_cost": tr.token_cost, "generator": tr.generator})
 
 
 @router.post("/submit", response_model=TrainingOut, status_code=status.HTTP_202_ACCEPTED)
@@ -65,8 +72,9 @@ async def submit_training(
     db: AsyncSession = Depends(get_db),
 ) -> TrainingRequest:
     """Queue a niche for Master Bot compilation. Poll GET /api/training/{id} or watch /ws/dashboard."""
+    require_training(user)
     if user.token_balance < settings.min_training_cost:
-        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, "Insufficient platform token balance")
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, "Insufficient platform token balance — monthly allowance used up. Upgrade or wait for renewal.")
     if body.target_connector_id:
         await get_owned_connector(db, user, body.target_connector_id)
     genesis = await db.scalar(select(MasterBot).where(MasterBot.bot_name == "Genesis"))

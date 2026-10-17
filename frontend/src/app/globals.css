@@ -31,3 +31,12 @@ body {
 @utility label {
   @apply mb-1 block text-xs font-medium tracking-wide text-slate-400 uppercase;
 }
+
+/* Docs prose */
+.docs h2 { @apply mt-8 text-xl font-bold text-slate-100; }
+.docs h3 { @apply mt-5 font-semibold text-slate-200; }
+.docs p, .docs li { @apply text-sm leading-relaxed text-slate-300; }
+.docs ul { @apply list-disc space-y-1 pl-5; }
+.docs ol { @apply list-decimal space-y-2 pl-5; }
+.docs a { @apply text-sky-300 hover:underline; }
+.docs :not(pre) > code { @apply rounded bg-slate-800 px-1.5 py-0.5 text-[12px] text-emerald-200; }
