@@ -91,6 +91,7 @@ class Settings(BaseSettings):
 
     # --- Bridge ---------------------------------------------------------------
     heartbeat_timeout_s: int = 90           # close connector socket if silent this long
+    heartbeat_db_interval_s: float = 60.0   # persist last_heartbeat at most this often (PINGs come every 20 s)
     default_task_timeout_s: int = 120
 
     @field_validator("database_url")

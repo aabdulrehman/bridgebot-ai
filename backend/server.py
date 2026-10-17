@@ -76,9 +76,27 @@ async def api_root() -> Dict[str, str]:
 
 
 @app.get("/healthz", tags=["meta"])
-async def healthz() -> Dict[str, object]:
-    """Health probe for Render/Koyeb."""
-    return {"ok": True, "online_connectors": len(hub.connectors), "llm": bool(settings.openrouter_api_key)}
+async def healthz(db: int = 0) -> Dict[str, object]:
+    """Health probe for Render/Koyeb. `?db=1` also measures database round-trip latency."""
+    out: Dict[str, object] = {"ok": True, "online_connectors": len(hub.connectors), "llm": bool(settings.openrouter_api_key)}
+    if db:
+        import time as _t
+
+        from sqlalchemy import text as _text
+
+        from app.database import SessionLocal
+        try:
+            t0 = _t.perf_counter()
+            async with SessionLocal() as s:
+                await s.execute(_text("SELECT 1"))
+                t1 = _t.perf_counter()
+                await s.execute(_text("SELECT 1"))
+                t2 = _t.perf_counter()
+            out["db"] = {"ok": True, "first_query_ms": round((t1 - t0) * 1000, 1), "roundtrip_ms": round((t2 - t1) * 1000, 1),
+                         "dialect": "sqlite" if settings.is_sqlite else "postgresql"}
+        except Exception as exc:  # noqa: BLE001
+            out["db"] = {"ok": False, "error": type(exc).__name__}
+    return out
 
 
 app.include_router(public.router)

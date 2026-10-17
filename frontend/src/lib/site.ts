@@ -2,6 +2,9 @@
 import type { Plan } from "./types";
 
 export const SITE_NAME = "BridgeBot AI";
+export const GITHUB_REPO = "https://github.com/aabdulrehman/bridgebot-ai";
+export const CONNECTOR_SOURCE = `${GITHUB_REPO}/blob/main/connector/local_connector.py`;
+export const CONNECTOR_README = `${GITHUB_REPO}/tree/main/connector#readme`;
 export const WHATSAPP_NUMBER = "966567009846";
 export const WHATSAPP_DISPLAY = "+966 56 700 9846";
 

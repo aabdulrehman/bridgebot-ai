@@ -44,6 +44,8 @@ class ConnectionHub:
         self.bots: Dict[uuid.UUID, WebSocket] = {}
         # HTTP tunnels: request_id -> (connector_id, future resolved by TUNNEL_RESPONSE)
         self.tunnel_waiters: Dict[str, Tuple[uuid.UUID, "asyncio.Future[Dict[str, Any]]"]] = {}
+        # at-least-once delivery from connectors: connector_id -> [stream id, highest seq received]
+        self.streams: Dict[uuid.UUID, list] = {}
         self.bot_events: Dict[uuid.UUID, asyncio.Event] = defaultdict(asyncio.Event)
 
     # ------------------------------------------------------------------ connectors

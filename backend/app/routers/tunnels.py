@@ -122,6 +122,7 @@ async def create_tunnel(body: TunnelCreateIn, request: Request, user: User = Dep
                local_port=body.local_port, token_hash=hash_api_key(token) if token else None)
     db.add(t)
     await db.commit()
+    _CACHE.clear()
     await db.refresh(t)
     await write_audit(conn.id, "TUNNEL_CREATED", {"tunnel_id": str(t.id), "slug": slug, "port": body.local_port})
     return {"tunnel": tunnel_out(t, public_base(request), conn.machine_name), "access_token": token}
@@ -144,6 +145,7 @@ async def patch_tunnel(tunnel_id: uuid.UUID, body: TunnelPatchIn, request: Reque
     elif body.require_token is False:
         t.token_hash = None
     await db.commit()
+    _CACHE.clear()
     return {"tunnel": tunnel_out(t, public_base(request)), "access_token": token}
 
 
@@ -154,6 +156,7 @@ async def rotate_tunnel_token(tunnel_id: uuid.UUID, request: Request, user: User
     token = _new_token()
     t.token_hash = hash_api_key(token)
     await db.commit()
+    _CACHE.clear()
     return {"tunnel": tunnel_out(t, public_base(request)), "access_token": token}
 
 
@@ -162,6 +165,7 @@ async def delete_tunnel(tunnel_id: uuid.UUID, user: User = Depends(get_current_u
     t = await _owned(db, user, tunnel_id)
     await db.delete(t)
     await db.commit()
+    _CACHE.clear()
 
 
 # --------------------------------------------------------------------------- public proxy
@@ -187,6 +191,44 @@ def _rewrite_location(value: str, slug: str, port: int, base: str) -> str:
     return value
 
 
+class _Info:
+    """Immutable snapshot of what the proxy needs about a tunnel (cached a few seconds per slug)."""
+
+    __slots__ = ("id", "slug", "connector_id", "local_port", "token_hash", "is_active", "owner_status", "machine_name")
+
+    def __init__(self, t: Tunnel, owner: User, conn: Connector) -> None:
+        self.id, self.slug, self.connector_id, self.local_port = t.id, t.slug, t.connector_id, t.local_port
+        self.token_hash, self.is_active = t.token_hash, t.is_active
+        self.owner_status, self.machine_name = owner.status, conn.machine_name
+
+
+CACHE_TTL_S = 5.0
+_CACHE: Dict[str, Any] = {}          # slug -> (expires_monotonic, _Info | None); cleared on every owner change
+_BG: set = set()
+
+
+def _bg(coro: Any) -> None:
+    """Fire-and-forget (stats writes must not delay the proxied response)."""
+    task = asyncio.create_task(coro)
+    _BG.add(task)
+    task.add_done_callback(_BG.discard)
+
+
+async def _lookup(slug: str) -> Optional[_Info]:
+    now = asyncio.get_running_loop().time()
+    hit = _CACHE.get(slug)
+    if hit and hit[0] > now:
+        return hit[1]
+    async with SessionLocal() as db:   # one round-trip: tunnel + owner + machine
+        row = (await db.execute(select(Tunnel, User, Connector).join(User, User.id == Tunnel.user_id)
+                                .join(Connector, Connector.id == Tunnel.connector_id).where(Tunnel.slug == slug))).first()
+    info = _Info(*row) if row else None
+    if len(_CACHE) > 5000:
+        _CACHE.clear()
+    _CACHE[slug] = (now + CACHE_TTL_S, info)
+    return info
+
+
 async def _record(tunnel_id: uuid.UUID, status_code: int, bytes_in: int, bytes_out: int) -> None:
     try:
         async with SessionLocal() as db:
@@ -209,13 +251,10 @@ async def proxy_root(slug: str, request: Request) -> Response:
 @router.api_route("/t/{slug}/{path:path}", methods=METHODS, include_in_schema=False)
 async def proxy(slug: str, path: str, request: Request) -> Response:
     """Forward any HTTP request to http://127.0.0.1:{port}/{path} on the owner's machine."""
-    async with SessionLocal() as db:
-        t = await db.scalar(select(Tunnel).where(Tunnel.slug == slug.lower()))
-        owner = await db.get(User, t.user_id) if t else None
-        conn = await db.get(Connector, t.connector_id) if t else None
-    if t is None or owner is None or conn is None:
+    t = await _lookup(slug.lower())
+    if t is None:
         return _page(404, "Tunnel not found", f"No tunnel named “{slug}” exists.")
-    if owner.status != "ACTIVE":
+    if t.owner_status != "ACTIVE":
         return _page(403, "Tunnel unavailable", "The owner's account is not active.")
     if not t.is_active:
         return _page(503, "Tunnel paused", "The owner has paused this tunnel.")
@@ -230,7 +269,7 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
 
     session = hub.connectors.get(t.connector_id)
     if session is None:
-        return _page(502, "Tunnel offline", f"The machine “{conn.machine_name}” is not connected. Start local_connector.py on it and retry.")
+        return _page(502, "Tunnel offline", f"The machine “{t.machine_name}” is not connected. Start local_connector.py on it and retry.")
     if "tunnel" not in session.features:
         return _page(502, "Connector update required", "The connector on this machine is too old for tunnels. Download the latest local_connector.py.")
 
@@ -267,11 +306,11 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
             "body_b64": base64.b64encode(body).decode() if body else "", "timeout_s": settings.tunnel_timeout_s,
             "max_response_bytes": limit})
         if not sent:
-            return _page(502, "Tunnel offline", f"Could not reach the machine “{conn.machine_name}”.")
+            return _page(502, "Tunnel offline", f"Could not reach the machine “{t.machine_name}”.")
         try:
             msg = await asyncio.wait_for(fut, timeout=settings.tunnel_timeout_s + 5)
         except asyncio.TimeoutError:
-            await _record(t.id, 504, len(body), 0)
+            _bg(_record(t.id, 504, len(body), 0))
             return _page(504, "Tunnel timeout", f"The local service on port {t.local_port} did not answer within {int(settings.tunnel_timeout_s)} s.")
         except ConnectionError:
             return _page(502, "Tunnel offline", "The machine disconnected while handling the request.")
@@ -280,7 +319,7 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
 
     if msg.get("error"):
         code = int(msg.get("status") or 502)
-        await _record(t.id, code, len(body), 0)
+        _bg(_record(t.id, code, len(body), 0))
         title = {504: "Tunnel timeout", 403: "Tunnel refused by machine"}.get(code, "Local service error")
         return _page(code, title, f"port {t.local_port}: {msg['error']}")
     try:
@@ -312,5 +351,5 @@ async def proxy(slug: str, path: str, request: Request) -> Response:
     elif not no_body:
         raw.append((b"content-length", str(len(data)).encode()))
     resp.raw_headers = raw
-    await _record(t.id, code, len(body), len(data))
+    _bg(_record(t.id, code, len(body), len(data)))
     return resp

@@ -2,17 +2,20 @@
 import Link from "next/link";
 import CodeBlock from "@/components/CodeBlock";
 import DocsLayout from "@/components/DocsLayout";
+import { CONNECTOR_README, CONNECTOR_SOURCE, GITHUB_REPO } from "@/lib/site";
 import { useApiBase } from "@/lib/useBase";
 
 export default function ConnectDocs() {
   const base = useApiBase();
   return (
     <DocsLayout title="Connect your machine">
-      <p>The connector is a single Python file. It only makes <b>outbound</b> connections, so no router/firewall changes are needed.</p>
+      <p>The connector is a single, <b>open-source (MIT)</b> Python file. It only makes <b>outbound</b> connections, so no router/firewall changes are needed. Read every line before you run it.</p>
       <div className="flex flex-wrap gap-2">
         <a className="btn-primary no-underline!" href="/downloads/local_connector.py" download>⬇ Download local_connector.py</a>
+        <a className="btn-ghost no-underline!" href={CONNECTOR_SOURCE} target="_blank" rel="noopener noreferrer" data-testid="view-source">View source on GitHub ↗</a>
         <a className="btn-ghost no-underline!" href="/downloads/connector_config.example.json" download>⬇ connector_config.example.json</a>
       </div>
+      <p className="text-xs text-slate-400">MIT licensed · <a href={CONNECTOR_README} target="_blank" rel="noopener noreferrer">connector README</a> · <a href={`${GITHUB_REPO}/blob/main/SECURITY.md`} target="_blank" rel="noopener noreferrer">security policy</a> · <a href={`${GITHUB_REPO}/blob/main/docs/phase1-testing.md`} target="_blank" rel="noopener noreferrer">resilience test results</a></p>
 
       <h2>Step 1 — Install Python 3.9+</h2>
       <ul>
@@ -79,8 +82,12 @@ sudo systemctl enable --now bridgebot`} />
 
       <h2>Troubleshooting</h2>
       <ul>
-        <li><b>HTTP 403 on connect</b> — wrong/rotated key, or account suspended.</li>
-        <li><b>Reconnecting…</b> — the free server may be waking up (~1 min). The connector retries automatically.</li>
+        <li><b>“❌ the cloud refused this connector: Invalid API key”</b> (close code 4401, or HTTP 403 on old servers) — wrong or rotated key: copy a fresh one from the Control Room. The connector retries slowly (every 1–4 min) so it never floods the server.</li>
+        <li><b>“Account suspended / banned”</b> (4403/4003) — contact support on WhatsApp.</li>
+        <li><b>“another connector process is using this API key”</b> (4000) — the same key runs twice; stop one copy (each machine needs its own key).</li>
+        <li><b>Reconnecting…</b> — network change, sleep/wake or the free server waking up (~1 min). The connector retries forever with backoff and re-delivers task output queued while offline.</li>
+        <li><b>Output arrives in bursts</b> — the program buffers when piped. Python is unbuffered automatically; for others use <code>stdbuf -oL your-command</code> (Linux) or its line-buffered flag.</li>
+        <li><b>Behind a corporate proxy</b> — set <code>HTTPS_PROXY=http://proxy:3128</code>.</li>
         <li><b>“not in allowed_commands”</b> — add the executable to your config.</li>
       </ul>
     </DocsLayout>

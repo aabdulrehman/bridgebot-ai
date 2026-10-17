@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { WhatsAppIcon } from "./WhatsAppFab";
-import { FALLBACK_PLANS, WHATSAPP_DISPLAY, money, readMe, upgradeMessage, waLink, type CachedMe } from "@/lib/site";
+import { CONNECTOR_SOURCE, FALLBACK_PLANS, GITHUB_REPO, WHATSAPP_DISPLAY, money, readMe, upgradeMessage, waLink, type CachedMe } from "@/lib/site";
 
 export default function Footer() {
   const [me, setMe] = useState<CachedMe | null>(null);
@@ -41,6 +41,7 @@ export default function Footer() {
             <li><Link href="/docs/bots/" className="hover:text-white">Bot API &amp; adapters</Link></li>
             <li><Link href="/docs/api/" className="hover:text-white">API reference</Link></li>
             <li><Link href="/docs/tunnels/" className="hover:text-white">HTTP tunnels</Link></li>
+            <li><a href={CONNECTOR_SOURCE} target="_blank" rel="noopener noreferrer" className="hover:text-white">Connector source (MIT) ↗</a></li>
             <li><Link href="/docs/webhooks/" className="hover:text-white">Webhooks</Link></li>
           </ul>
         </div>
@@ -68,7 +69,7 @@ export default function Footer() {
         </div>
       </div>
       <div className="border-t border-slate-900 py-4 text-center text-xs text-slate-600">
-        © {new Date().getFullYear()} BridgeBot AI · Payments via PayPal (paypal.me/BunnyOnMoney) or WhatsApp · verified by our team · Built on a 100% free stack
+        © {new Date().getFullYear()} BridgeBot AI · Payments via PayPal (paypal.me/BunnyOnMoney) or WhatsApp · verified by our team · Built on a 100% free stack · <a href={GITHUB_REPO} target="_blank" rel="noopener noreferrer" className="hover:text-white">Open source on GitHub</a>
       </div>
     </footer>
   );

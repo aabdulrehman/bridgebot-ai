@@ -263,3 +263,10 @@ These are ephemeral (URL changes each run) — fine for demos, not production.
 * Dashboard JWT is stored in `localStorage` and sent to `/ws/dashboard` as a query param (browsers can't set WS headers). Use HTTPS only; consider short JWT expiry.
 * Rate limiting / email verification / password reset are not implemented.
 * Free hosts sleep: the first request after idle can take ~1 min on Render.
+
+## Open source & security
+
+* The connector is **open source (MIT)** — [`connector/local_connector.py`](connector/local_connector.py), docs in [`connector/README.md`](connector/README.md). The whole repo is MIT ([`LICENSE`](LICENSE)).
+* Vulnerability reports: [`SECURITY.md`](SECURITY.md) (private GitHub advisory or WhatsApp).
+* Resilience test campaign against the live site: [`docs/phase1-testing.md`](docs/phase1-testing.md).
+* Payments: manual PayPal today; Stripe/Paddle plug-in point documented in [`docs/payments.md`](docs/payments.md).

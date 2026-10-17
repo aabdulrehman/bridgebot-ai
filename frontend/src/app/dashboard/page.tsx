@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import Shell from "@/components/Shell";
 import StatusDot from "@/components/StatusDot";
 import { api, apiBase } from "@/lib/api";
+import { CONNECTOR_SOURCE } from "@/lib/site";
 import { useHubSocket } from "@/lib/useHubSocket";
 import type { Connector, HubEvent } from "@/lib/types";
 
@@ -188,7 +189,10 @@ export default function DashboardPage() {
             <div className="card space-y-2 border-amber-600/60">
               <p className="text-sm font-semibold text-amber-300">🔑 API key for {newKey.machine} — shown only once!</p>
               <code className="block break-all rounded-lg bg-slate-950 p-2 text-xs text-amber-200">{newKey.key}</code>
-              <p className="text-xs text-slate-400">Run on that PC (needs <code>pip install websockets</code>):</p>
+              <p className="text-xs text-slate-400">
+                <a className="text-sky-300 underline" href="/downloads/local_connector.py" download>⬇ Download local_connector.py</a> ·{" "}
+                <a className="text-sky-300 underline" href={CONNECTOR_SOURCE} target="_blank" rel="noopener noreferrer">View source on GitHub</a> (MIT) — then run on that PC (needs <code>pip install websockets</code>):
+              </p>
               <code className="block break-all rounded-lg bg-slate-950 p-2 text-[11px] text-slate-300">{runCmd}</code>
               <div className="flex gap-2">
                 <button className="btn-ghost text-xs" onClick={() => navigator.clipboard.writeText(runCmd)}>Copy command</button>

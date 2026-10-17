@@ -101,15 +101,28 @@ async def _record_skill(connector_id: uuid.UUID, msg: Dict[str, Any]) -> None:
         await db.commit()
 
 
+async def _db_worker(jobs: "asyncio.Queue[Any]", connector_id: uuid.UUID) -> None:
+    """Run one connection's database side effects sequentially; a failing job is logged, never fatal."""
+    while True:
+        job = await jobs.get()
+        if job is None:
+            return
+        try:
+            await job()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("connector %s background db job failed: %s", connector_id, exc)
+
+
 @router.websocket("/ws/connect")
 async def connector_ws(ws: WebSocket) -> None:
     """Persistent tunnel for a local connector daemon."""
     raw_key = _extract_api_key(ws)
     conn = owner = None
     if raw_key:
-        async with SessionLocal() as db:
-            conn = await db.scalar(select(Connector).where(Connector.api_key_hash == hash_api_key(raw_key)))
-            owner = await db.get(User, conn.user_id) if conn else None
+        async with SessionLocal() as db:   # one round-trip: connector + owner
+            row = (await db.execute(select(Connector, User).join(User, User.id == Connector.user_id)
+                                    .where(Connector.api_key_hash == hash_api_key(raw_key)))).first()
+            conn, owner = (row[0], row[1]) if row else (None, None)
     # Auth failures: accept, then close with an explicit 44xx code + reason so the connector can show a clear
     # error and back off for minutes (a pre-accept close only surfaces as a bare "HTTP 403").
     if conn is None or owner is None or owner.status != "ACTIVE":
@@ -126,13 +139,20 @@ async def connector_ws(ws: WebSocket) -> None:
     await ws.accept()
     connector_id, user_id = conn.id, conn.user_id
     session = ConnectorSession(connector_id=connector_id, user_id=user_id, websocket=ws)
+    # Database side effects run on a per-connection background worker (in order), never on the receive path:
+    # with a remote Postgres each round-trip costs 100s of ms and would otherwise delay live LOG streaming.
+    jobs: "asyncio.Queue[Any]" = asyncio.Queue()
+    worker = asyncio.create_task(_db_worker(jobs, connector_id))
+    await ws.send_json({"type": "WELCOME", "connector_id": str(connector_id), "machine_name": conn.machine_name,
+                        "heartbeat_timeout_s": settings.heartbeat_timeout_s, "acks": True})
     await hub.register_connector(session)
-    await _set_status(connector_id, "ONLINE")
     await hub.broadcast_to_user(user_id, {"type": "CONNECTOR_STATUS", "connector_id": str(connector_id), "status": "ONLINE", "machine_name": conn.machine_name})
-    await write_audit(connector_id, "CONNECTED", {"client": ws.client.host if ws.client else None})
-    await webhooks.emit(user_id, "connector.online", {"connector_id": str(connector_id), "machine_name": conn.machine_name})
-    await ws.send_json({"type": "WELCOME", "connector_id": str(connector_id), "machine_name": conn.machine_name, "heartbeat_timeout_s": settings.heartbeat_timeout_s})
+    jobs.put_nowait(lambda: _set_status(connector_id, "ONLINE"))
+    client_ip = ws.client.host if ws.client else None
+    jobs.put_nowait(lambda: write_audit(connector_id, "CONNECTED", {"client": client_ip}))
+    jobs.put_nowait(lambda: webhooks.emit(user_id, "connector.online", {"connector_id": str(connector_id), "machine_name": conn.machine_name}))
     log.info("connector %s (%s) online", conn.machine_name, connector_id)
+    last_hb_write = asyncio.get_running_loop().time()
 
     try:
         while True:
@@ -151,44 +171,75 @@ async def connector_ws(ws: WebSocket) -> None:
                 continue
 
             mtype = str(msg.get("type", "")).upper()
+            seq = msg.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool):
+                st = hub.streams.get(connector_id)
+                if st is not None:
+                    if seq <= st[1]:
+                        continue                      # duplicate re-sent after a reconnect
+                    st[1] = seq
             if mtype == "PING":
-                await hub.send_to_connector(connector_id, {"type": "PONG", "ts": msg.get("ts")})
-                await _set_status(connector_id, "ONLINE")
+                st = hub.streams.get(connector_id)
+                await hub.send_to_connector(connector_id, {"type": "PONG", "ts": msg.get("ts"), "ack": st[1] if st else None})
+                now = asyncio.get_running_loop().time()
+                if now - last_hb_write >= settings.heartbeat_db_interval_s:   # throttle last_heartbeat writes
+                    last_hb_write = now
+                    jobs.put_nowait(lambda: _set_status(connector_id, "ONLINE"))
                 continue
             if mtype == "TUNNEL_RESPONSE":
                 hub.resolve_tunnel(connector_id, msg)   # never relayed/audited: bodies can be large
                 continue
+            # Relay to the owner's dashboards first (live logs must not wait for the database).
+            await hub.broadcast_to_user(user_id, {**msg, "type": mtype, "connector_id": str(connector_id)})
             if mtype == "HELLO":
                 session.features = {str(f) for f in (msg.get("features") or []) if isinstance(f, str)}
-                await _upsert_agents(connector_id, msg.get("agents"))
-                botnet.spawn(botnet.resume_for_connector(connector_id))
-            elif mtype == "SKILL_ACK":
-                await _record_skill(connector_id, msg)
-                if msg.get("ok"):
-                    await webhooks.emit(user_id, "skill.injected", {
-                        "connector_id": str(connector_id), "machine_name": conn.machine_name, "agent_name": msg.get("agent_name"),
-                        "skill_id": msg.get("skill_id"), "training_request_id": msg.get("request_id"), "path": msg.get("path")})
-                botnet.spawn(botnet.on_connector_skill_ack(msg))
-            elif mtype == "TASK_RESULT":
-                await webhooks.emit(user_id, "task.completed", {
-                    "connector_id": str(connector_id), "machine_name": conn.machine_name, "task_id": msg.get("task_id"),
-                    "exit_code": msg.get("exit_code"), "duration_ms": msg.get("duration_ms"), "error": msg.get("error"),
-                    "stdout_tail": msg.get("stdout_tail", [])})
-                botnet.spawn(botnet.on_connector_task_result(msg))
+                stream = msg.get("stream")
+                if isinstance(stream, str) and stream:
+                    cur = hub.streams.get(connector_id)
+                    if cur is None or cur[0] != stream:   # new connector process → new sequence space
+                        hub.streams[connector_id] = [stream, 0]
+                agents = msg.get("agents")
 
-            # Relay everything else to the owner's dashboards.
-            await hub.broadcast_to_user(user_id, {**msg, "type": mtype, "connector_id": str(connector_id)})
+                async def _hello(agents: Any = agents) -> None:
+                    await _upsert_agents(connector_id, agents)
+                    botnet.spawn(botnet.resume_for_connector(connector_id))
+                jobs.put_nowait(_hello)
+            elif mtype == "SKILL_ACK":
+                async def _ack(m: Dict[str, Any] = msg) -> None:
+                    await _record_skill(connector_id, m)
+                    if m.get("ok"):
+                        await webhooks.emit(user_id, "skill.injected", {
+                            "connector_id": str(connector_id), "machine_name": conn.machine_name, "agent_name": m.get("agent_name"),
+                            "skill_id": m.get("skill_id"), "training_request_id": m.get("request_id"), "path": m.get("path")})
+                    botnet.spawn(botnet.on_connector_skill_ack(m))
+                jobs.put_nowait(_ack)
+            elif mtype == "TASK_RESULT":
+                if isinstance(seq, int):
+                    await hub.send_to_connector(connector_id, {"type": "ACK", "ack": seq})
+                async def _result(m: Dict[str, Any] = msg) -> None:
+                    await webhooks.emit(user_id, "task.completed", {
+                        "connector_id": str(connector_id), "machine_name": conn.machine_name, "task_id": m.get("task_id"),
+                        "exit_code": m.get("exit_code"), "duration_ms": m.get("duration_ms"), "error": m.get("error"),
+                        "stdout_tail": m.get("stdout_tail", [])})
+                    botnet.spawn(botnet.on_connector_task_result(m))
+                jobs.put_nowait(_result)
             if mtype in AUDITED_TYPES:
-                await write_audit(connector_id, mtype, msg)
+                jobs.put_nowait(lambda m=msg, t=mtype: write_audit(connector_id, t, m))
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001
         log.exception("connector %s socket error: %s", connector_id, exc)
     finally:
         hub.fail_tunnels(connector_id)
+        jobs.put_nowait(None)          # drain pending DB work (in order) before writing OFFLINE
+        try:
+            await asyncio.wait_for(asyncio.shield(worker), timeout=30)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+            pass
         if await hub.unregister_connector(connector_id, ws):
-            await _set_status(connector_id, "OFFLINE", heartbeat=False)
             await hub.broadcast_to_user(user_id, {"type": "CONNECTOR_STATUS", "connector_id": str(connector_id), "status": "OFFLINE"})
+            if not hub.is_online(connector_id):          # a newer session may have connected meanwhile
+                await _set_status(connector_id, "OFFLINE", heartbeat=False)
             await write_audit(connector_id, "DISCONNECTED", {})
             await webhooks.emit(user_id, "connector.offline", {"connector_id": str(connector_id), "machine_name": conn.machine_name})
             log.info("connector %s offline", connector_id)

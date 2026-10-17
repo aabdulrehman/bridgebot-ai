@@ -2,6 +2,7 @@
 import Link from "next/link";
 import CodeBlock from "@/components/CodeBlock";
 import DocsLayout from "@/components/DocsLayout";
+import { CONNECTOR_SOURCE } from "@/lib/site";
 import { useApiBase } from "@/lib/useBase";
 
 export default function GettingStarted() {
@@ -10,7 +11,7 @@ export default function GettingStarted() {
     <DocsLayout title="Getting started">
       <p>BridgeBot AI has two services that share one account:</p>
       <ul>
-        <li><b>Cloud-to-Local Bridge</b> — a small Python daemon on your PC keeps a secure WebSocket open to <code>{base}</code>. From the dashboard you dispatch commands and watch their stdout/stderr live.</li>
+        <li><b>Cloud-to-Local Bridge</b> — a small, open-source (<a href={CONNECTOR_SOURCE} target="_blank" rel="noopener noreferrer">view source on GitHub</a>, MIT) Python daemon on your PC keeps a secure WebSocket open to <code>{base}</code>. From the dashboard you dispatch commands and watch their stdout/stderr live.</li>
         <li><b>On-Demand Training</b> — describe your business niche; the Master Bot compiles a JSON skill (system prompt, tools, memory, guardrails). After you approve, it is pushed into your local agent.</li>
       </ul>
       <h2>1. Create your account</h2>

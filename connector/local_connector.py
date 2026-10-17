@@ -42,6 +42,7 @@ import socket
 import sys
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -86,10 +87,10 @@ class ConnectorConfig:
     machine_name: str = field(default_factory=socket.gethostname)
     heartbeat_interval_s: float = 20.0
     reconnect_base_s: float = 1.0
-    reconnect_max_s: float = 60.0
+    reconnect_max_s: float = 30.0       # cap: after an outage the link is back within ≤30 s of the network
     auth_retry_s: float = 60.0           # wait after "invalid API key" / "account suspended" (doubles, max 4x)
-    ws_ping_interval_s: float = 20.0     # WebSocket ping; a dead link is detected within interval + timeout
-    ws_ping_timeout_s: float = 20.0
+    ws_ping_interval_s: float = 10.0     # WebSocket ping; a dead link is detected within interval + timeout
+    ws_ping_timeout_s: float = 10.0
     allowed_commands: List[str] = field(default_factory=lambda: list(DEFAULT_ALLOWED))
     allow_any_command: bool = False
     max_concurrent_tasks: int = 4
@@ -205,12 +206,21 @@ class LocalConnector:
         self._welcomed = False
         self._outbox: "collections.deque[Dict[str, Any]]" = collections.deque(maxlen=OUTBOX_MAX)
         self._flush_lock = asyncio.Lock()
+        # At-least-once delivery for task/skill events: every reliable event gets a sequence number; events stay
+        # in _unacked until the cloud confirms them (ack on PONG/ACK) and are re-sent after a reconnect, so even
+        # data written into a silently-dead socket is not lost. The cloud de-duplicates by (stream, seq).
+        self._stream = uuid.uuid4().hex
+        self._seq = 0
+        self._unacked: "collections.deque[Dict[str, Any]]" = collections.deque(maxlen=OUTBOX_MAX)
+        self._acks = False          # enabled when the cloud's WELCOME says it supports acks
         self._server_heartbeat_timeout_s = 90.0
 
     # ------------------------------------------------------------------ transport
     async def send(self, message: Dict[str, Any]) -> bool:
         """Send a message. Task/skill events are queued (bounded) while offline and delivered in order on reconnect."""
         if message.get("type") in RELIABLE_TYPES:
+            self._seq += 1
+            message["seq"] = self._seq
             self._outbox.append(message)
             return await self._flush()
         return await self._raw_send(message)
@@ -220,10 +230,29 @@ class LocalConnector:
             return False
         async with self._flush_lock:
             while self._outbox:
-                if not await self._raw_send(self._outbox[0]):
+                msg = self._outbox[0]
+                if not await self._raw_send(msg):
                     return False
                 self._outbox.popleft()
+                if self._acks:
+                    self._unacked.append(msg)
         return True
+
+    def _on_ack(self, ack: Any) -> None:
+        if not isinstance(ack, int):
+            return
+        while self._unacked and int(self._unacked[0].get("seq", 0)) <= ack:
+            self._unacked.popleft()
+
+    def _requeue_unacked(self) -> int:
+        """After a reconnect: everything not confirmed by the cloud goes back to the front of the outbox."""
+        n = len(self._unacked)
+        if n:
+            pending = list(self._unacked) + list(self._outbox)
+            self._unacked.clear()
+            self._outbox.clear()
+            self._outbox.extend(pending)
+        return n
 
     async def _raw_send(self, message: Dict[str, Any]) -> bool:
         """Serialise and send; returns False if the socket is gone."""
@@ -324,8 +353,13 @@ class LocalConnector:
             "platform": f"{platform.system()} {platform.release()} / py{platform.python_version()}",
             "agents": self.cfg.agents,
             "allowed_commands": "*" if self.cfg.allow_any_command else self.cfg.allowed_commands,
-            "features": ["tasks", "skills"] + (["tunnel"] if self.cfg.tunnels_enabled else []),
+            "features": ["tasks", "skills", "acks"] + (["tunnel"] if self.cfg.tunnels_enabled else []),
+            "stream": self._stream,
         })
+        async with self._flush_lock:
+            resent = self._requeue_unacked()
+        if resent:
+            log.info("re-sending %d task events not yet confirmed by the cloud", resent)
         if self._outbox:
             log.info("delivering %d queued task events from while offline", len(self._outbox))
             await self._flush()
@@ -359,13 +393,16 @@ class LocalConnector:
             return
         if mtype == "WELCOME":
             self._welcomed = True
+            self._acks = bool(msg.get("acks"))
+            if not self._acks:
+                self._unacked.clear()
             try:
                 self._server_heartbeat_timeout_s = float(msg.get("heartbeat_timeout_s") or 90)
             except (TypeError, ValueError):
                 pass
             log.info("✅ authenticated as connector %s (%s)", msg.get("connector_id"), msg.get("machine_name"))
-        elif mtype == "PONG":
-            log.debug("pong")
+        elif mtype in ("PONG", "ACK"):
+            self._on_ack(msg.get("ack"))
         elif mtype == "TASK":
             self._spawn(self._handle_task(msg))
         elif mtype == "CANCEL":
