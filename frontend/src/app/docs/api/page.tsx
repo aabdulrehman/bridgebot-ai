@@ -72,6 +72,7 @@ export default function ApiDocs() {
   const base = useApiBase();
   return (
     <DocsLayout title="API reference">
+      <p className="rounded-xl border border-sky-800/50 bg-sky-950/30 p-3 text-sm">🤖 Bot-side endpoints (<code>/api/bot/*</code>, <code>/ws/bot</code>), bot management (<code>/api/bots</code>) and the Marketplace (<code>/api/marketplace/*</code>) are documented in <Link href="/docs/bots/">Bot API &amp; adapters</Link> and <Link href="/docs/marketplace/">Marketplace</Link>.</p>
       <p>Base URL: <code>{base}</code>. JSON in/out. Interactive OpenAPI docs: <a href={`${base}/docs`} target="_blank" rel="noopener noreferrer">{base}/docs</a>.</p>
       <h2>Authentication</h2>
       <p>Create a personal key under <Link href="/api-keys/">API keys</Link> and send it as a bearer token (or <code>X-API-Key</code> header). Keys start with <code>bbu_</code>, are shown once, and can be revoked any time. Dashboard JWTs work too.</p>

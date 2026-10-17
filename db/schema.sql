@@ -30,11 +30,12 @@ CREATE TABLE IF NOT EXISTS plans (
     sort_order           INTEGER     NOT NULL DEFAULT 0,
     is_active            BOOLEAN     NOT NULL DEFAULT TRUE
 );
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS max_bots INTEGER NOT NULL DEFAULT 1;   -- Universal Bot API limit
 INSERT INTO plans (id, name, price_monthly_cents, currency, monthly_tokens, max_machines, max_tasks_per_day,
-                   max_webhooks, max_api_keys, training_access, inbound_webhooks, features_json, sort_order, is_active) VALUES
-    ('FREE',     'Free',        0, 'USD',   5000,  1,   50,  1,  1, TRUE, FALSE, '[]'::jsonb, 0, TRUE),
-    ('PRO',      'Pro',      1900, 'USD', 100000,  5, 1000, 10,  5, TRUE, TRUE,  '[]'::jsonb, 1, TRUE),
-    ('BUSINESS', 'Business', 7900, 'USD', 500000, 25,   -1, 50, 20, TRUE, TRUE,  '[]'::jsonb, 2, TRUE)
+                   max_webhooks, max_api_keys, training_access, inbound_webhooks, features_json, sort_order, is_active, max_bots) VALUES
+    ('FREE',     'Free',        0, 'USD',   5000,  1,   50,  1,  1, TRUE, FALSE, '[]'::jsonb, 0, TRUE,  1),
+    ('PRO',      'Pro',      1900, 'USD', 100000,  5, 1000, 10,  5, TRUE, TRUE,  '[]'::jsonb, 1, TRUE, 10),
+    ('BUSINESS', 'Business', 7900, 'USD', 500000, 25,   -1, 50, 20, TRUE, TRUE,  '[]'::jsonb, 2, TRUE, 50)
 ON CONFLICT (id) DO NOTHING;
 
 -- -----------------------------------------------------------------------------
@@ -253,6 +254,105 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 CREATE INDEX IF NOT EXISTS ix_webhook_deliveries_webhook_id ON webhook_deliveries (webhook_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_pending             ON webhook_deliveries (status, next_attempt_at);
 
+-- =============================================================================
+-- Universal Bot Bridge + Master Bot Marketplace
+-- =============================================================================
+-- marketplace_masters: Master Bots published by the platform owner (admin).
+CREATE TABLE IF NOT EXISTS marketplace_masters (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug               VARCHAR(80)  NOT NULL UNIQUE,
+    name               VARCHAR(120) NOT NULL,
+    avatar             VARCHAR(16)  NOT NULL DEFAULT '🤖',
+    tagline            VARCHAR(200) NOT NULL DEFAULT '',
+    description        TEXT         NOT NULL DEFAULT '',
+    persona            TEXT         NOT NULL DEFAULT '',
+    skill_payload_json JSONB        NOT NULL DEFAULT '{}'::jsonb,
+    tools_json         JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    welcome_message    TEXT         NOT NULL DEFAULT '',
+    test_prompt        TEXT         NOT NULL DEFAULT '',
+    test_expect        VARCHAR(200),
+    min_plan_id        VARCHAR(20)  NOT NULL DEFAULT 'FREE' REFERENCES plans (id),
+    is_published       BOOLEAN      NOT NULL DEFAULT FALSE,
+    created_by         UUID REFERENCES users (id) ON DELETE SET NULL,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- bots: any agent bot linked to the platform (connector or generic Bot API).
+CREATE TABLE IF NOT EXISTS bots (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    name          VARCHAR(120) NOT NULL,
+    framework     VARCHAR(30)  NOT NULL DEFAULT 'custom',     -- hermes, openclaw, n8n, langchain, http, grok, cli, custom
+    delivery      VARCHAR(12)  NOT NULL DEFAULT 'poll'
+                  CONSTRAINT bots_delivery_chk CHECK (delivery IN ('poll','webhook','websocket','connector')),
+    webhook_url   VARCHAR(1000),
+    connector_id  UUID REFERENCES connectors (id) ON DELETE SET NULL,
+    agent_name    VARCHAR(120) NOT NULL DEFAULT 'default',
+    token_hash    VARCHAR(64)  NOT NULL UNIQUE,               -- SHA-256 of the bbt_ token
+    token_prefix  VARCHAR(16)  NOT NULL,
+    secret        VARCHAR(80)  NOT NULL,                      -- whsec_ used to sign pushes to the bot
+    status        VARCHAR(10)  NOT NULL DEFAULT 'ACTIVE' CONSTRAINT bots_status_chk CHECK (status IN ('ACTIVE','DISABLED')),
+    persona       TEXT,
+    skills_json   JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    last_seen_at  TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_bots_user_id ON bots (user_id);
+
+-- bot_messages: inbox ('in', polled via GET /api/bot/updates?offset=) and outbox ('out').
+CREATE TABLE IF NOT EXISTS bot_messages (
+    id           SERIAL PRIMARY KEY,
+    bot_id       UUID NOT NULL REFERENCES bots (id) ON DELETE CASCADE,
+    direction    VARCHAR(3)  NOT NULL CONSTRAINT bot_msg_direction_chk CHECK (direction IN ('in','out')),
+    kind         VARCHAR(20) NOT NULL DEFAULT 'message',    -- message, welcome, skill_inject, task, system
+    chat         VARCHAR(10) NOT NULL DEFAULT 'direct',     -- direct | group
+    group_id     UUID REFERENCES marketplace_masters (id) ON DELETE SET NULL,
+    sender       VARCHAR(160) NOT NULL DEFAULT 'owner',
+    text         TEXT NOT NULL DEFAULT '',
+    payload_json JSONB,
+    reply_to     INTEGER,
+    delivered_at TIMESTAMPTZ,
+    acked_at     TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_bot_messages_bot_id ON bot_messages (bot_id);
+CREATE INDEX IF NOT EXISTS idx_bot_msg_poll       ON bot_messages (bot_id, direction, id);
+
+-- master_group_members: bots inside a Master Bot's messenger group + onboarding state.
+CREATE TABLE IF NOT EXISTS master_group_members (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    master_id       UUID NOT NULL REFERENCES marketplace_masters (id) ON DELETE CASCADE,
+    bot_id          UUID NOT NULL REFERENCES bots (id) ON DELETE CASCADE,
+    user_id         UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    status          VARCHAR(10) NOT NULL DEFAULT 'JOINED'
+                    CONSTRAINT group_member_status_chk CHECK (status IN ('JOINED','WAITING','INJECTING','INJECTED','TESTING','GRADUATED','FAILED')),
+    is_master_clone BOOLEAN NOT NULL DEFAULT FALSE,
+    skill_id        VARCHAR(120),
+    inject_ref      VARCHAR(64),
+    test_ref        VARCHAR(64),
+    last_error      TEXT,
+    joined_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    injected_at     TIMESTAMPTZ,
+    graduated_at    TIMESTAMPTZ,
+    CONSTRAINT uq_group_member UNIQUE (master_id, bot_id)
+);
+CREATE INDEX IF NOT EXISTS ix_master_group_members_master_id ON master_group_members (master_id);
+CREATE INDEX IF NOT EXISTS ix_master_group_members_bot_id    ON master_group_members (bot_id);
+CREATE INDEX IF NOT EXISTS ix_master_group_members_user_id   ON master_group_members (user_id);
+
+-- master_group_messages: the group feed.
+CREATE TABLE IF NOT EXISTS master_group_messages (
+    id            SERIAL PRIMARY KEY,
+    master_id     UUID NOT NULL REFERENCES marketplace_masters (id) ON DELETE CASCADE,
+    sender_type   VARCHAR(10)  NOT NULL,                     -- master | bot | system
+    sender_bot_id UUID REFERENCES bots (id) ON DELETE SET NULL,
+    sender_name   VARCHAR(160) NOT NULL,
+    text          TEXT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_master_group_messages_master_id ON master_group_messages (master_id);
+
 -- -----------------------------------------------------------------------------
 -- Seed: built-in free master bot.
 -- -----------------------------------------------------------------------------
@@ -277,3 +377,8 @@ ALTER TABLE payments           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE api_keys           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhooks           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webhook_deliveries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE marketplace_masters   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bots                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bot_messages          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE master_group_members  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE master_group_messages ENABLE ROW LEVEL SECURITY;

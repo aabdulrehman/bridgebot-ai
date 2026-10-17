@@ -39,6 +39,9 @@ class ConnectionHub:
         self.connectors: Dict[uuid.UUID, ConnectorSession] = {}
         self.dashboards: Dict[uuid.UUID, Set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
+        # Bot API: bot_id -> live /ws/bot socket, and wake-up events for long polling.
+        self.bots: Dict[uuid.UUID, WebSocket] = {}
+        self.bot_events: Dict[uuid.UUID, asyncio.Event] = defaultdict(asyncio.Event)
 
     # ------------------------------------------------------------------ connectors
     async def register_connector(self, session: ConnectorSession) -> None:
@@ -99,6 +102,38 @@ class ConnectionHub:
                 dead.append(ws)
         for ws in dead:
             await self.remove_dashboard(user_id, ws)
+
+
+    # ------------------------------------------------------------------ bots
+    async def register_bot(self, bot_id: uuid.UUID, ws: WebSocket) -> None:
+        old = self.bots.get(bot_id)
+        self.bots[bot_id] = ws
+        if old is not None and old is not ws:
+            try:
+                await old.close(code=4000, reason="Replaced by a newer session")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def unregister_bot(self, bot_id: uuid.UUID, ws: WebSocket) -> None:
+        if self.bots.get(bot_id) is ws:
+            del self.bots[bot_id]
+
+    def bot_online(self, bot_id: uuid.UUID) -> bool:
+        return bot_id in self.bots
+
+    async def send_to_bot(self, bot_id: uuid.UUID, message: Dict[str, Any]) -> bool:
+        ws = self.bots.get(bot_id)
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(message)
+            return True
+        except Exception:  # noqa: BLE001
+            self.bots.pop(bot_id, None)
+            return False
+
+    def wake_bot(self, bot_id: uuid.UUID) -> None:
+        self.bot_events[bot_id].set()
 
 
 hub = ConnectionHub()

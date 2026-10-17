@@ -10,6 +10,8 @@ import Footer from "./Footer";
 
 const NAV = [
   { href: "/dashboard/", label: "Control Room", short: "Control", icon: "🛰️" },
+  { href: "/bots/", label: "My Bots", short: "Bots", icon: "🤖" },
+  { href: "/marketplace/", label: "Marketplace", short: "Market", icon: "🏪" },
   { href: "/train/", label: "Train My Bot", short: "Train", icon: "🧠" },
   { href: "/webhooks/", label: "Webhooks", short: "Hooks", icon: "🔔" },
   { href: "/api-keys/", label: "API Keys", short: "Keys", icon: "🔑" },
@@ -68,10 +70,10 @@ export default function Shell({ children, balanceKey = 0, adminOnly = false }: {
             <img src="/icon-192.png" alt="" className="h-8 w-8 rounded-lg" />
             <span className="hidden font-bold tracking-tight sm:inline">BridgeBot <span className="text-emerald-400">AI</span></span>
           </Link>
-          <nav className="hidden gap-1 lg:flex">
+          <nav className="hidden gap-0.5 xl:flex">
             {nav.map((n) => (
               <Link key={n.href} href={n.href}
-                className={`rounded-lg px-3 py-1.5 text-sm ${path === n.href ? "bg-slate-800 text-emerald-300" : "text-slate-400 hover:text-slate-200"}`}>
+                className={`rounded-lg px-2.5 py-1.5 text-sm ${path === n.href ? "bg-slate-800 text-emerald-300" : "text-slate-400 hover:text-slate-200"}`}>
                 {n.icon} {n.label}
               </Link>
             ))}
@@ -97,12 +99,12 @@ export default function Shell({ children, balanceKey = 0, adminOnly = false }: {
           <a className="underline" href={waLink(upgradeMessage("Pro", user.email))} target="_blank" rel="noopener noreferrer">WhatsApp</a>
         </div>
       )}
-      <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 p-4 pb-24 lg:pb-6">{children}</main>
-      <div className="pb-16 lg:pb-0"><Footer /></div>
-      <nav className="fixed inset-x-0 bottom-0 z-30 flex border-t border-slate-800 bg-slate-950/95 pb-[env(safe-area-inset-bottom)] lg:hidden">
+      <main className="mx-auto w-full max-w-7xl flex-1 space-y-4 p-4 pb-24 xl:pb-6">{children}</main>
+      <div className="pb-16 xl:pb-0"><Footer /></div>
+      <nav className="fixed inset-x-0 bottom-0 z-30 flex overflow-x-auto border-t border-slate-800 bg-slate-950/95 pb-[env(safe-area-inset-bottom)] xl:hidden">
         {nav.map((n) => (
           <Link key={n.href} href={n.href}
-            className={`flex flex-1 flex-col items-center py-2 text-[10px] ${path === n.href ? "text-emerald-300" : "text-slate-400"}`}>
+            className={`flex min-w-[58px] flex-1 flex-col items-center py-2 text-[10px] ${path === n.href ? "text-emerald-300" : "text-slate-400"}`}>
             <span className="text-lg">{n.icon}</span>
             {n.short}
           </Link>

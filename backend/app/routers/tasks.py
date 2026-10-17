@@ -23,12 +23,12 @@ settings = get_settings()
 
 async def dispatch_task(db: AsyncSession, user: User, conn: Connector, command: Union[str, List[str]],
                         agent_name: Optional[str] = None, timeout_s: Optional[int] = None,
-                        cwd: Optional[str] = None, source: str = "api") -> str:
+                        cwd: Optional[str] = None, source: str = "api", task_id: Optional[str] = None) -> str:
     """Enforce quota, send TASK over the bridge, notify dashboards, audit. Returns task_id."""
     if not hub.is_online(conn.id):
         raise HTTPException(status.HTTP_409_CONFLICT, "Connector is OFFLINE")
     consume_task_quota(user)
-    task_id = uuid.uuid4().hex
+    task_id = task_id or uuid.uuid4().hex
     message = {"type": "TASK", "task_id": task_id, "command": command, "agent_name": agent_name,
                "timeout_s": timeout_s or settings.default_task_timeout_s, "cwd": cwd}
     if not await hub.send_to_connector(conn.id, message):

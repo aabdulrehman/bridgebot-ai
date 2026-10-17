@@ -103,6 +103,12 @@ async def init_db() -> None:
                 skill_payload_json={"system_prompt_style": "expert-operator", "version": 1},
             ))
 
+        # Marketplace starter Master Bots (only into an empty table).
+        if await session.scalar(select(models.MarketplaceMaster).limit(1)) is None:
+            from .marketplace_seed import seed_rows
+            for row in seed_rows():
+                session.add(models.MarketplaceMaster(**row))
+
         # Admin bootstrap (only when both env vars are set).
         if settings.admin_email and settings.admin_password:
             email = settings.admin_email_normalized

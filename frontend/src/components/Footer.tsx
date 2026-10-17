@@ -28,6 +28,7 @@ export default function Footer() {
           <ul className="space-y-1 text-sm text-slate-400">
             <li><Link href="/#features" className="hover:text-white">Cloud-to-Local Bridge</Link></li>
             <li><Link href="/#training" className="hover:text-white">On-Demand Training</Link></li>
+            <li><Link href="/marketplace/" className="hover:text-white">Master Bot Marketplace</Link></li>
             <li><Link href="/pricing/" className="hover:text-white">Pricing</Link></li>
             <li><Link href="/dashboard/" className="hover:text-white">Dashboard</Link></li>
           </ul>
@@ -37,6 +38,7 @@ export default function Footer() {
           <ul className="space-y-1 text-sm text-slate-400">
             <li><Link href="/docs/" className="hover:text-white">Getting started</Link></li>
             <li><Link href="/docs/connect/" className="hover:text-white">Connect your machine</Link></li>
+            <li><Link href="/docs/bots/" className="hover:text-white">Bot API &amp; adapters</Link></li>
             <li><Link href="/docs/api/" className="hover:text-white">API reference</Link></li>
             <li><Link href="/docs/webhooks/" className="hover:text-white">Webhooks</Link></li>
           </ul>

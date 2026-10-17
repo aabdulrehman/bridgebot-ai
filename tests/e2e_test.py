@@ -16,6 +16,12 @@ HTTP webhook receiver, then exercises:
               skill.injected / connector.offline · delivery log · retry after 500
   Inbound     POST /api/hooks/in/{token} triggers a task on the machine
   Training    submit → READY → approve → SKILL_INJECT → SKILL_ACK → file on disk
+  Bot API     register bots (poll / webhook / websocket / connector) · bbt_ token auth ·
+              long-poll updates · owner<->bot chat · plan bot limit
+  Marketplace published Master Bots · plan gating · join → automated welcome + skill
+              injection + follow-up test → GRADUATED (all 4 delivery types) · one-click
+              "Make my bot a master" (persona clone) · group chat + master auto-guide ·
+              bot.joined / bot.onboarded webhooks · admin publish from training
   Admin       ADMIN_EMAIL (case-insensitive) is the ONLY admin · stats · users ·
               change plan · token adjust · suspend (kicks connector) · reactivate ·
               connectors · audit
@@ -88,6 +94,15 @@ class Receiver:
                     return
                 rec["answered"] = 200
                 outer.hits.append(rec)
+                if self.path == "/bot":
+                    upd = rec["json"].get("update") or {}
+                    reply: Dict[str, Any] = {"ok": True}
+                    if upd.get("kind") == "task":
+                        expect = (upd.get("payload") or {}).get("expect") or "ok"
+                        reply = {"text": f"I'd build an n8n {expect}: Stripe trigger → filter → Slack node, with an error branch."}
+                    out = json.dumps(reply).encode()
+                    self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(out)
+                    return
                 self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
 
             def log_message(self, *a: Any) -> None:
@@ -288,7 +303,9 @@ async def main() -> int:
             other = await http.post("/api/auth/register", json={"email": f"other_{uuid.uuid4().hex[:6]}@example.com", "password": "Password123"})
             check(other.json()["role"] == "user", "another new account is NOT admin")
             r = await http.post("/api/auth/register", json={"email": ADMIN_EMAIL.lower(), "password": "AdminPass123"})
-            check(r.status_code == 201 and r.json()["role"] == "admin", "ADMIN_EMAIL account got role=admin")
+            if r.status_code == 409:  # re-used database: the admin account already exists
+                r = await http.post("/api/auth/login", json={"email": ADMIN_EMAIL.lower(), "password": "AdminPass123"})
+            check(r.status_code in (200, 201) and r.json()["role"] == "admin", "ADMIN_EMAIL account got role=admin")
             r = await http.post("/api/auth/login", json={"email": ADMIN_EMAIL.upper(), "password": "AdminPass123"})
             A = {"Authorization": f"Bearer {r.json()['access_token']}"}
             pend = (await http.get("/api/admin/upgrade-requests", headers=A)).json()
@@ -373,6 +390,186 @@ async def main() -> int:
             check((await http.delete(f"/api/api-keys/{ukey_id}", headers=H)).status_code == 200, "revoked")
             check((await http.get("/api/connectors", headers=K)).status_code == 401, "revoked key → 401")
 
+            # ================================================================ Universal Bot API + Marketplace
+            async def wait_member(hdr: Dict[str, str], bot_id: str, master_slug_or_name: str, want: str, timeout: float = 25) -> Dict[str, Any]:
+                deadline = time.monotonic() + timeout
+                last: Any = None
+                while time.monotonic() < deadline:
+                    ms = (await http.get("/api/marketplace/me/memberships", headers=hdr)).json()
+                    last = [m for m in ms if m["bot_id"] == bot_id]
+                    for m in last:
+                        if m["status"] == want:
+                            return m
+                        if m["status"] == "FAILED" and want != "FAILED":
+                            raise AssertionError(f"onboarding FAILED: {m}")
+                    await asyncio.sleep(0.2)
+                raise AssertionError(f"membership never reached {want}: {last}")
+
+            step("marketplace: public catalogue + plan gating")
+            mk = (await http.get("/api/marketplace")).json()
+            slugs = {m["slug"]: m for m in mk}
+            check({"customer-support-master", "n8n-automation-architect", "sales-closer-elite"} <= set(slugs), f"{len(mk)} Master Bots published")
+            check(slugs["sales-closer-elite"]["min_plan_id"] == "BUSINESS" and slugs["n8n-automation-architect"]["min_plan_id"] == "PRO", "plan gates FREE/PRO/BUSINESS")
+            cs_id = slugs["customer-support-master"]["id"]
+
+            step("Bot API: FREE user links a polling bot (Hermes)")
+            O = {"Authorization": f"Bearer {other.json()['access_token']}"}
+            r = await http.post("/api/bots", headers=O, json={"name": "hermes-helper", "framework": "hermes", "delivery": "poll"})
+            check(r.status_code == 201 and r.json()["token"].startswith("bbt_") and r.json()["secret"].startswith("whsec_"), "bot registered → bbt_ token + signing secret")
+            pbot, ptoken = r.json()["bot"]["id"], r.json()["token"]
+            check((await http.post("/api/bots", headers=O, json={"name": "second"})).status_code == 402, "bot #2 blocked on FREE (402)")
+            B = {"Authorization": f"Bot {ptoken}"}
+            check((await http.get("/api/bot/me", headers={"Authorization": "Bot bbt_wrong"})).status_code == 401, "bad bot token → 401")
+            me = (await http.get("/api/bot/me", headers=B)).json()
+            check(me["id"] == pbot and me["framework"] == "hermes", "GET /api/bot/me with bot token")
+            r = await http.post(f"/api/bots/{pbot}/messages", headers=O, json={"text": "hi bot, status?"})
+            check(r.status_code == 201, "owner → bot message queued")
+            up = (await http.get("/api/bot/updates", headers=B, params={"offset": 0, "timeout": 5})).json()
+            check(up["updates"] and up["updates"][0]["text"] == "hi bot, status?" and up["updates"][0]["sender"] == "owner", "bot long-polled the owner message")
+            offset = up["next_offset"]
+            r = await http.post("/api/bot/messages", headers=B, json={"text": "all systems green", "reply_to": up["updates"][0]["update_id"]})
+            check(r.status_code == 201, "bot replied via REST")
+            conv = (await http.get(f"/api/bots/{pbot}/messages", headers=O)).json()
+            check([m["direction"] for m in conv] == ["in", "out"] and conv[1]["reply_to"] == conv[0]["update_id"], "owner sees the conversation thread")
+            check((await http.post(f"/api/marketplace/sales-closer-elite/join", headers=O, json={"bot_id": pbot})).status_code == 402, "FREE user blocked from BUSINESS master (402)")
+
+            step("marketplace: polling bot joins Customer Support Master → automated onboarding")
+            r = await http.post(f"/api/marketplace/{cs_id}/join", headers=O, json={"bot_id": pbot})
+            check(r.status_code == 200 and r.json()["onboarding_started"], "joined the master's group, onboarding started")
+            got: List[Dict[str, Any]] = []
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not any(u["kind"] == "skill_inject" for u in got):
+                up = (await http.get("/api/bot/updates", headers=B, params={"offset": offset, "timeout": 5})).json()
+                got += up["updates"]; offset = up["next_offset"]
+            kinds = [u["kind"] for u in got]
+            check("welcome" in kinds and "skill_inject" in kinds, f"master sent welcome + skill package ({kinds})")
+            inj = next(u for u in got if u["kind"] == "skill_inject")
+            check(inj["payload"]["skill"]["skill_id"] == "master_customer_support_master" and inj["payload"]["skill"]["persona"], "skill payload carries skill_id + persona + tools")
+            check((await http.post("/api/bot/ack", headers=B, json={"update_id": inj["update_id"], "ok": True})).status_code == 200, "bot ACKed the skill")
+            test_upd = None
+            for _ in range(5):
+                up = (await http.get("/api/bot/updates", headers=B, params={"offset": offset, "timeout": 5})).json()
+                offset = up["next_offset"]
+                test_upd = next((u for u in up["updates"] if u["kind"] == "task"), None)
+                if test_upd:
+                    break
+            check(test_upd is not None and test_upd["payload"]["expect"] == "support", "follow-up test task received")
+            await http.post("/api/bot/messages", headers=B, json={"text": "Sorry for the delay!", "reply_to": test_upd["update_id"]})
+            up = (await http.get("/api/bot/updates", headers=B, params={"offset": offset, "timeout": 5})).json()
+            offset = up["next_offset"]
+            retry = next((u for u in up["updates"] if u["kind"] == "task"), None)
+            check(retry is not None and "support" in retry["text"], "wrong answer → master coaches and re-tests")
+            await http.post("/api/bot/messages", headers=B, json={"text": "Hi! Customer support here — I'm checking order #1234 now.", "reply_to": retry["update_id"]})
+            m = await wait_member(O, pbot, "customer-support-master", "GRADUATED")
+            check(m["skill_id"] == "master_customer_support_master", "polling bot GRADUATED")
+            sk = (await http.get("/api/bot/skills", headers=B)).json()
+            check(sk["skills"] and sk["skills"][0]["skill"]["skill_id"] == "master_customer_support_master", "GET /api/bot/skills returns the installed skill")
+
+            step("marketplace: webhook bot (n8n) → one-click 'Make my bot a master'")
+            r = await http.post("/api/webhooks", headers=H, json={"url": rx.url("/events"), "events": ["bot.joined", "bot.onboarded", "bot.message"]})
+            check(r.status_code == 201, "owner webhook for bot.* events")
+            ev_secret = r.json()["secret"]
+            r = await http.post("/api/bots", headers=H, json={"name": "n8n-flow-bot", "framework": "n8n", "delivery": "webhook", "webhook_url": rx.url("/bot")})
+            wbot, wsecret = r.json()["bot"]["id"], r.json()["secret"]
+            r = await http.post("/api/marketplace/n8n-automation-architect/make-master", headers=H, json={"bot_id": wbot})
+            check(r.status_code == 200 and r.json()["membership"]["master_clone"], "make-master accepted (PRO+ master on BUSINESS plan)")
+            m = await wait_member(H, wbot, "n8n", "GRADUATED")
+            check(m["master_clone"], "webhook bot auto-onboarded with zero manual steps → GRADUATED master clone")
+            pushes = [h for h in rx.hits if h["path"] == "/bot"]
+            check({h["json"]["update"]["kind"] for h in pushes} >= {"welcome", "skill_inject", "task"}, "welcome, skill_inject and test pushed to the bot webhook")
+            check(all(verify_sig(wsecret, h["body"], h["headers"]["x-bridgebot-signature"]) for h in pushes), "bot pushes HMAC-signed with the bot secret")
+            b = next(x for x in (await http.get("/api/bots", headers=H)).json() if x["id"] == wbot)
+            check(b["persona"] and b["skills"][0]["skill_id"] == "master_n8n_automation_architect", "bot now carries the master persona + skill")
+            hit = await rx.wait(lambda h: h["path"] == "/events" and h["json"].get("event") == "bot.onboarded" and h["json"]["data"]["bot_id"] == wbot)
+            check(verify_sig(ev_secret, hit["body"], hit["headers"]["x-bridgebot-signature"]) and hit["json"]["data"]["master_clone"], "bot.onboarded owner webhook (signed)")
+            await rx.wait(lambda h: h["path"] == "/events" and h["json"].get("event") == "bot.joined")
+            print("  ✔ bot.joined owner webhook")
+
+            step("marketplace: WebSocket bot (OpenClaw) + group chat + master auto-guide")
+            r = await http.post("/api/bots", headers=H, json={"name": "openclaw-ws", "framework": "openclaw", "delivery": "websocket"})
+            wsbot, wstoken = r.json()["bot"]["id"], r.json()["token"]
+            async with websockets.connect(f"{ws_base}/ws/bot?token={wstoken}") as bws:
+                ready = json.loads(await bws.recv())
+                check(ready["type"] == "READY" and ready["bot_id"] == wsbot, "bot WebSocket READY")
+
+                async def next_update(pred: Callable[[Dict[str, Any]], bool], timeout: float = 15) -> Dict[str, Any]:
+                    end = time.monotonic() + timeout
+                    while time.monotonic() < end:
+                        msg = json.loads(await asyncio.wait_for(bws.recv(), timeout=end - time.monotonic()))
+                        if msg.get("type") == "UPDATE" and pred(msg):
+                            return msg
+                    raise AssertionError("update not received")
+                await http.post(f"/api/marketplace/{cs_id}/join", headers=H, json={"bot_id": wsbot})
+                await next_update(lambda u: u["kind"] == "welcome")
+                inj = await next_update(lambda u: u["kind"] == "skill_inject")
+                await bws.send(json.dumps({"type": "ACK", "update_id": inj["update_id"], "ok": True}))
+                t = await next_update(lambda u: u["kind"] == "task")
+                await bws.send(json.dumps({"type": "MESSAGE", "text": "Customer support ready to help!", "reply_to": t["update_id"]}))
+                await wait_member(H, wsbot, "customer", "GRADUATED")
+                print("  ✔ WebSocket bot instantly onboarded → GRADUATED")
+                await bws.send(json.dumps({"type": "MESSAGE", "chat": "group", "group_id": cs_id, "text": "@master how should I handle refunds?"}))
+                guide = await next_update(lambda u: u["sender"].startswith("master:") and u["chat"] == "group" and "Tools:" in u["text"])
+                check("lookup_order" in guide["text"], "master auto-guides questions in the group")
+            up = (await http.get("/api/bot/updates", headers=B, params={"offset": offset, "timeout": 5})).json()
+            check(any("handle refunds" in u["text"] and u["sender"] == "bot:openclaw-ws" for u in up["updates"]), "group message relayed to the other member bot")
+            feed = (await http.get(f"/api/marketplace/{cs_id}/group", headers=O)).json()
+            texts = " | ".join(x["text"] for x in feed["messages"])
+            check(len(feed["members"]) == 2 and texts.count("🎓") == 2 and "👋" in texts and "🧠" in texts, "group feed shows welcome → inject → graduation for both bots")
+            check((await http.get(f"/api/marketplace/{cs_id}/group", headers={"Authorization": f"Bearer {token}"})).status_code == 200, "member owner can read the group")
+
+            step("Python SDK adapter (bridgebot_sdk.py --exec, Hermes-style SKILL.md)")
+            r = await http.post("/api/bots", headers=H, json={"name": "hermes-cli", "framework": "hermes", "delivery": "poll"})
+            sbot, stoken = r.json()["bot"]["id"], r.json()["token"]
+            hermes_dir = tmp / "hermes_skills"
+            sdk = subprocess.Popen([PY, str(ROOT / "connector" / "bridgebot_sdk.py"), "--server", base, "--token", stoken,
+                                    "--exec", "echo [hermes] {text}", "--skills-dir", str(hermes_dir), "--skill-format", "skillmd"],
+                                   stdout=open(tmp / "sdk.log", "w"), stderr=subprocess.STDOUT)
+            procs.append(sdk)
+            await http.post(f"/api/marketplace/{cs_id}/join", headers=H, json={"bot_id": sbot})
+            await wait_member(H, sbot, "customer", "GRADUATED", timeout=40)
+            md = hermes_dir / "master_customer_support_master" / "SKILL.md"
+            check(md.is_file() and md.read_text().startswith("---\nname: master_customer_support_master"), "SDK installed the skill as Hermes/OpenClaw SKILL.md")
+            print("  ✔ SDK bot (CLI adapter) auto-onboarded → GRADUATED")
+            await http.post(f"/api/bots/{sbot}/messages", headers=H, json={"text": "ping from owner"})
+            for _ in range(100):
+                conv = (await http.get(f"/api/bots/{sbot}/messages", headers=H)).json()
+                if any(m["direction"] == "out" and m["text"] == "[hermes] ping from owner" for m in conv):
+                    break
+                await asyncio.sleep(0.2)
+            check(any(m["direction"] == "out" and m["text"] == "[hermes] ping from owner" for m in conv), "owner message → CLI bot → reply (no shell)")
+            sdk.terminate()
+
+            step("marketplace: connector bot → SKILL_INJECT over the bridge + real test task")
+            await dash.close()  # the suspension above closed the old dashboard socket; open a fresh one
+            dash = Dashboard(ws_base, token)
+            await dash.start()
+            await dash.wait_for(lambda e: e["type"] == "SNAPSHOT")
+            r = await http.post("/api/bots", headers=H, json={"name": "local-langchain", "framework": "langchain", "delivery": "connector",
+                                                               "connector_id": cid, "agent_name": "support-agent"})
+            cbot = r.json()["bot"]["id"]
+            r = await http.post("/api/marketplace/sales-closer-elite/make-master", headers=H, json={"bot_id": cbot})
+            check(r.status_code == 200, "BUSINESS master unlocked on BUSINESS plan")
+            m = await wait_member(H, cbot, "sales", "GRADUATED", timeout=30)
+            f = skills_dir / "support-agent" / "master_sales_closer_elite.json"
+            check(f.is_file() and json.loads(f.read_text())["persona"], f"skill file written by the connector: {f.name}")
+            ev = await dash.wait_for(lambda e: e["type"] == "TASK_RESULT" and any("master_sales_closer_elite" in x for x in e.get("stdout_tail") or []))
+            check(ev["exit_code"] == 0, "follow-up echo test task ran on the machine → GRADUATED")
+            await dash.wait_for(lambda e: e["type"] == "ONBOARDING_STATUS" and e["bot_id"] == cbot and e["status"] == "GRADUATED")
+            print("  ✔ dashboard got ONBOARDING_STATUS GRADUATED")
+
+            step("admin: publish a Master Bot from a trained payload")
+            check((await http.post("/api/admin/marketplace", headers=H, json={"name": "Hack"})).status_code == 403, "non-admin cannot publish")
+            r = await http.post(f"/api/admin/marketplace/from-training/{trid}", headers=A, params={"min_plan_id": "PRO"})
+            check(r.status_code == 201 and r.json()["is_published"], f"published '{r.json()['name']}'")
+            new_id = r.json()["id"]
+            check(any(x["id"] == new_id for x in (await http.get("/api/marketplace")).json()), "visible in public marketplace")
+            r = await http.post(f"/api/marketplace/{new_id}/join", headers=O, json={"bot_id": pbot})
+            check(r.status_code == 402, "FREE user gated from PRO master")
+            await http.patch(f"/api/admin/marketplace/{new_id}", headers=A, json={"is_published": False})
+            check((await http.get(f"/api/marketplace/{new_id}")).status_code == 404, "unpublished → hidden")
+            adm = (await http.get("/api/admin/marketplace", headers=A)).json()
+            check(any(x["id"] == new_id and not x["is_published"] for x in adm), "admin still sees the draft")
+
             step("stop connector → OFFLINE")
             await asyncio.sleep(3)
             for p in procs[1:]:
@@ -386,7 +583,7 @@ async def main() -> int:
         print("\n✅ ALL E2E CHECKS PASSED")
         return 0
     except Exception:
-        for name in ("backend.log", "connector.log"):
+        for name in ("backend.log", "connector.log", "sdk.log"):
             f = tmp / name
             if f.exists():
                 print(f"\n----- {name} -----\n{f.read_text()[-5000:]}")

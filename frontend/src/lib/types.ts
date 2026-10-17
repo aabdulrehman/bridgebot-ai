@@ -164,3 +164,27 @@ export interface HubEvent {
   error?: string | null;
   [key: string]: unknown;
 }
+
+// ---------------------------------------------------------------- Bot API + Marketplace
+export interface BotGroup { master_id: string; master: string; status: string; master_clone: boolean; error: string | null }
+export interface Bot {
+  id: string; name: string; framework: string; delivery: "poll" | "webhook" | "websocket" | "connector";
+  webhook_url: string | null; connector_id: string | null; agent_name: string; token_prefix: string; status: string;
+  persona: string | null; skills: { skill_id: string; name?: string; master?: string; installed_at?: string }[];
+  online: boolean; last_seen_at: string | null; created_at: string; groups?: BotGroup[];
+}
+export interface BotMsg {
+  update_id: number; kind: string; chat: string; group_id: string | null; sender: string; text: string;
+  payload: unknown; reply_to: number | null; direction: "in" | "out"; created_at: string; acked: boolean;
+}
+export interface Master {
+  id: string; slug: string; name: string; avatar: string; tagline: string; description: string; persona: string;
+  min_plan_id: string; min_plan_name: string; is_published: boolean; members: number; graduated: number;
+  skill_id: string; skill_name: string | null; tools: string[]; test_prompt: string; created_at: string;
+  skill_payload?: Record<string, unknown>; tools_json?: Record<string, unknown>[]; welcome_message?: string; test_expect?: string | null;
+}
+export interface Membership {
+  id: string; master_id: string; master: string | null; bot_id: string; bot: string | null; status: string;
+  master_clone: boolean; skill_id: string | null; error?: string | null; joined_at: string; graduated_at: string | null;
+  mine?: boolean; framework?: string | null;
+}

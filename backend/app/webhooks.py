@@ -39,7 +39,8 @@ from .models import Webhook, WebhookDelivery
 log = logging.getLogger("bridgebot.webhooks")
 settings = get_settings()
 
-EVENTS = ["connector.online", "connector.offline", "task.completed", "skill.injected", "training.ready"]
+EVENTS = ["connector.online", "connector.offline", "task.completed", "skill.injected", "training.ready",
+          "bot.message", "bot.joined", "bot.onboarded"]
 _wakeup = asyncio.Event()
 
 

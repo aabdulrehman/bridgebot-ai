@@ -162,3 +162,16 @@ def require_inbound_webhooks(user: User) -> None:
 def require_training(user: User) -> None:
     if not user.plan.training_access:
         raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, f"Training is not included in the {user.plan.name} plan.")
+
+
+async def enforce_bot_limit(db: AsyncSession, user: User) -> None:
+    from ..models import Bot
+    used = await db.scalar(select(func.count()).select_from(Bot).where(Bot.user_id == user.id)) or 0
+    if _limit_reached(user.plan.max_bots, used):
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, f"{user.plan.name} plan allows {user.plan.max_bots} linked bot(s). Upgrade to link more.")
+
+
+def require_plan_at_least(user: User, plan: Plan) -> None:
+    """Marketplace gate: the user's plan tier (sort_order) must be >= the listing's min plan."""
+    if user.plan.sort_order < plan.sort_order:
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, f"This Master Bot requires the {plan.name} plan or higher. Upgrade on /billing.")

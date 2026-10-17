@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import StatusDot from "@/components/StatusDot";
+import AdminMarketplace from "@/components/AdminMarketplace";
 import { api } from "@/lib/api";
 import { money } from "@/lib/site";
 import type { UpgradeRequest, User } from "@/lib/types";
 
-type Tab = "overview" | "upgrades" | "users" | "machines" | "payments" | "audit";
+type Tab = "overview" | "upgrades" | "users" | "machines" | "marketplace" | "payments" | "audit";
 interface Stats {
   users_total: number; users_by_plan: Record<string, number>; users_by_status: Record<string, number>; new_users_7d: number;
   connectors_total: number; connectors_online: number; dashboards_open: number; mrr_cents: number; revenue_total_cents: number;
@@ -69,7 +70,7 @@ export default function AdminPage() {
   };
   const patchUser = (id: string, body: Record<string, unknown>, ok: string) => act(() => api(`/api/admin/users/${id}`, { method: "PATCH", json: body }), ok);
 
-  const TABS: [Tab, string][] = [["overview", "Overview"], ["upgrades", `Upgrades${stats?.pending_upgrades ? ` (${stats.pending_upgrades})` : ""}`], ["users", "Users"], ["machines", "Machines"], ["payments", "Revenue"], ["audit", "Audit"]];
+  const TABS: [Tab, string][] = [["overview", "Overview"], ["upgrades", `Upgrades${stats?.pending_upgrades ? ` (${stats.pending_upgrades})` : ""}`], ["users", "Users"], ["machines", "Machines"], ["marketplace", "Marketplace"], ["payments", "Revenue"], ["audit", "Audit"]];
 
   return (
     <Shell adminOnly>
@@ -181,6 +182,8 @@ export default function AdminPage() {
           </table>
         </div>
       )}
+
+      {tab === "marketplace" && <AdminMarketplace />}
 
       {tab === "payments" && (
         <div className="card overflow-x-auto p-0">

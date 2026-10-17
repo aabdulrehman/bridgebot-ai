@@ -1,4 +1,6 @@
 // Headless UI smoke for the SaaS flow: pricing PayPal buttons -> register -> PayPal upgrade request -> admin approves.
+const { spawn } = require("child_process");
+const path = require("path");
 const puppeteer = require(process.env.PUPPETEER || "puppeteer-core");
 const BASE = process.env.BASE || "http://localhost:8099";
 const ADMIN = process.env.ADMIN || "abaudii12@gmail.com";
@@ -9,9 +11,12 @@ const ok = (c, m) => { if (!c) { console.error("✘ " + m); process.exit(1); } c
   const b = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
   const p = await b.newPage(); await p.setViewport({ width: 1280, height: 900 });
   const errs = []; p.on("pageerror", (e) => errs.push(p.url() + " " + e.message.slice(0, 60)));
-  for (const path of ["/", "/pricing/", "/docs/", "/docs/connect/", "/docs/api/", "/docs/webhooks/"]) {
-    const r = await p.goto(BASE + path, { waitUntil: "networkidle0" }); ok(r.status() === 200, `GET ${path} 200`);
+  for (const u of ["/", "/pricing/", "/marketplace/", "/docs/", "/docs/connect/", "/docs/bots/", "/docs/marketplace/", "/docs/api/", "/docs/webhooks/"]) {
+    const r = await p.goto(BASE + u, { waitUntil: "networkidle0" }); ok(r.status() === 200, `GET ${u} 200`);
   }
+  await p.goto(BASE + "/marketplace/", { waitUntil: "networkidle0" });
+  const cards = await p.$$eval("button, a", (els) => els.filter((e) => /Start free to use this master/.test(e.textContent)).length);
+  ok(cards >= 3, `public marketplace shows ${cards} masters`);
   await p.goto(BASE + "/pricing/", { waitUntil: "networkidle0" });
   const pp = await p.$$eval("a[href*='paypal.me']", (a) => a.map((x) => x.href));
   ok(pp.includes("https://paypal.me/BunnyOnMoney/19USD") && pp.includes("https://paypal.me/BunnyOnMoney/79USD"), "pricing PayPal buttons " + pp.join(" "));
@@ -29,6 +34,29 @@ const ok = (c, m) => { if (!c) { console.error("✘ " + m); process.exit(1); } c
   const [btn] = await p.$$("xpath/.//button[contains(., 'Submit PayPal payment')]"); ok(!!btn, "submit PayPal button present");
   await btn.click(); await p.waitForFunction(() => document.body.innerText.includes("pending admin approval"), { timeout: 10000 });
   ok(true, "upgrade request pending shown"); await p.screenshot({ path: SHOTS + "/billing.png", fullPage: true });
+  // link a bot in the UI, run the real SDK with the shown token, make it a master
+  await p.goto(BASE + "/bots/", { waitUntil: "networkidle0" });
+  await p.type("#bname", "ui-hermes");
+  const [linkBtn] = await p.$$("xpath/.//button[normalize-space(.)='Link bot']"); await linkBtn.click();
+  await p.waitForFunction(() => document.body.innerText.includes("Copy the bot token now"), { timeout: 10000 });
+  const tok = await p.$$eval("pre code", (els) => els.map((e) => e.textContent).find((t) => /^bbt_/.test(t)));
+  ok(tok && tok.startsWith("bbt_"), "bot token shown once in UI");
+  await p.screenshot({ path: SHOTS + "/bots.png", fullPage: true });
+  const sdk = spawn("python3", [path.join(__dirname, "..", "connector", "bridgebot_sdk.py"), "--server", BASE, "--token", tok, "--exec", "echo [hermes] customer support ready: {text}"], { stdio: "ignore" });
+  await p.goto(BASE + "/marketplace/", { waitUntil: "networkidle0" });
+  const [mm] = await p.$$("xpath/.//button[contains(., 'Make my bot a master')]"); ok(!!mm, "Make my bot a master button");
+  await mm.click();
+  await p.waitForFunction(() => document.body.innerText.includes("GRADUATED"), { timeout: 30000 });
+  ok(true, "one click → bot GRADUATED (welcome + inject + test automatic)");
+  await p.screenshot({ path: SHOTS + "/marketplace.png", fullPage: true });
+  const [og] = await p.$$("xpath/.//a[contains(., 'Open group')]"); await og.click();
+  await p.waitForFunction(() => document.body.innerText.includes("🎓"), { timeout: 15000 });
+  ok(true, "group feed shows graduation");
+  await p.screenshot({ path: SHOTS + "/group.png", fullPage: true });
+  sdk.kill();
+  await p.goto(BASE + "/bots/", { waitUntil: "networkidle0" });
+  await p.waitForFunction(() => document.body.innerText.includes("Master persona"), { timeout: 10000 });
+  ok(true, "bot shows cloned master persona + skill");
   // admin
   await p.evaluate(() => localStorage.clear());
   await p.goto(BASE + "/login/", { waitUntil: "networkidle0" });
@@ -37,6 +65,10 @@ const ok = (c, m) => { if (!c) { console.error("✘ " + m); process.exit(1); } c
   await p.goto(BASE + "/admin/", { waitUntil: "networkidle0" });
   await p.waitForFunction(() => document.body.innerText.includes("Users"), { timeout: 10000 });
   await p.screenshot({ path: SHOTS + "/admin.png", fullPage: true });
+  const [mt] = await p.$$("xpath/.//button[normalize-space(.)='Marketplace']"); await mt.click();
+  await p.waitForFunction(() => document.body.innerText.includes("Publish a new Master Bot") && document.body.innerText.includes("Sales Closer Elite"), { timeout: 10000 });
+  ok(true, "admin marketplace tab lists masters + publish form");
+  await p.screenshot({ path: SHOTS + "/admin_marketplace.png", fullPage: true });
   const tabs = await p.$$("xpath/.//button[contains(., 'Upgrade')]"); if (tabs[0]) await tabs[0].click();
   await p.waitForFunction(() => document.body.innerText.includes("PAYID-UI-TEST-123"), { timeout: 10000 }); ok(true, "admin sees PayPal txn id");
   await p.screenshot({ path: SHOTS + "/admin_upgrades.png", fullPage: true });

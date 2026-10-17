@@ -20,7 +20,7 @@ settings = get_settings()
 
 # Searched in order: Docker image path, repo checkout path.
 _CONNECTOR_CANDIDATES = [Path("/app/connector"), Path(__file__).resolve().parents[3] / "connector"]
-_DOWNLOADABLE = {"local_connector.py", "connector_config.example.json", "requirements.txt"}
+_DOWNLOADABLE = {"bridgebot_sdk.py", "local_connector.py", "connector_config.example.json", "requirements.txt"}
 
 
 @router.get("/plans", response_model=List[PlanOut])

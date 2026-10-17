@@ -79,3 +79,11 @@ def generate_hook_token() -> str:
 def generate_webhook_secret() -> str:
     """HMAC signing secret for outbound webhooks."""
     return "whsec_" + secrets.token_urlsafe(32)
+
+
+BOT_TOKEN_PREFIX = "bbt_"
+
+
+def generate_bot_token() -> str:
+    """Bot API token (shown once). Bots authenticate with `Authorization: Bot bbt_...`."""
+    return BOT_TOKEN_PREFIX + secrets.token_urlsafe(32)

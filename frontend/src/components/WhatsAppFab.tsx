@@ -24,7 +24,7 @@ export default function WhatsAppFab() {
     : "Hello BridgeBot AI, I have a question about your plans:";
   return (
     <a href={waLink(text)} target="_blank" rel="noopener noreferrer" aria-label="Contact on WhatsApp"
-      className="fixed right-4 bottom-20 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-xl shadow-black/40 transition hover:scale-105 md:bottom-6">
+      className="fixed right-4 bottom-20 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-xl shadow-black/40 transition hover:scale-105 xl:bottom-6">
       <WhatsAppIcon className="h-8 w-8" />
     </a>
   );

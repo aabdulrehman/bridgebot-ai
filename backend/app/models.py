@@ -40,6 +40,7 @@ class Plan(Base):
     max_api_keys: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     training_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     inbound_webhooks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    max_bots: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))  # Bot API / marketplace bots
     features_json: Mapped[Any] = mapped_column(JSONType, nullable=False, default=list)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -256,3 +257,119 @@ class WebhookDelivery(Base):
     next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# =============================================================================
+# Universal Bot Bridge + Master Bot Marketplace
+# =============================================================================
+class Bot(Base):
+    """Any agent bot linked to the platform: via the local connector or the generic Bot API."""
+
+    __tablename__ = "bots"
+    __table_args__ = (
+        CheckConstraint("delivery IN ('poll','webhook','websocket','connector')", name="bots_delivery_chk"),
+        CheckConstraint("status IN ('ACTIVE','DISABLED')", name="bots_status_chk"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    framework: Mapped[str] = mapped_column(String(30), nullable=False, default="custom")   # hermes, openclaw, n8n, langchain, http, grok, custom
+    delivery: Mapped[str] = mapped_column(String(12), nullable=False, default="poll")
+    webhook_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    connector_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("connectors.id", ondelete="SET NULL"), nullable=True)
+    agent_name: Mapped[str] = mapped_column(String(120), nullable=False, default="default")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    secret: Mapped[str] = mapped_column(String(80), nullable=False)                       # signs webhook pushes
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVE")
+    persona: Mapped[Optional[str]] = mapped_column(Text, nullable=True)                   # set by "Make my bot a master"
+    skills_json: Mapped[Any] = mapped_column(JSONType, nullable=False, default=list)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class BotMessage(Base):
+    """Bot inbox/outbox. direction 'in' = to the bot (polled as updates), 'out' = posted by the bot."""
+
+    __tablename__ = "bot_messages"
+    __table_args__ = (
+        CheckConstraint("direction IN ('in','out')", name="bot_msg_direction_chk"),
+        Index("idx_bot_msg_poll", "bot_id", "direction", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)        # monotonically increasing => poll offset
+    bot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bots.id", ondelete="CASCADE"), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(3), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="message")     # message, welcome, skill_inject, task, system
+    chat: Mapped[str] = mapped_column(String(10), nullable=False, default="direct")      # direct (owner) | group
+    group_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("marketplace_masters.id", ondelete="SET NULL"), nullable=True)
+    sender: Mapped[str] = mapped_column(String(160), nullable=False, default="owner")
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload_json: Mapped[Optional[Any]] = mapped_column(JSONType, nullable=True)
+    reply_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    acked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class MarketplaceMaster(Base):
+    """A Master Bot published by the platform owner: skill payload + persona + tools + its messenger group."""
+
+    __tablename__ = "marketplace_masters"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    avatar: Mapped[str] = mapped_column(String(16), nullable=False, default="🤖")
+    tagline: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    persona: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    skill_payload_json: Mapped[Any] = mapped_column(JSONType, nullable=False, default=dict)
+    tools_json: Mapped[Any] = mapped_column(JSONType, nullable=False, default=list)
+    welcome_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    test_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    test_expect: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)      # keyword the reply must contain
+    min_plan_id: Mapped[str] = mapped_column(ForeignKey("plans.id"), nullable=False, default="FREE")
+    is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class GroupMember(Base):
+    """A bot inside a Master Bot's messenger group + its automated onboarding state."""
+
+    __tablename__ = "master_group_members"
+    __table_args__ = (
+        UniqueConstraint("master_id", "bot_id", name="uq_group_member"),
+        CheckConstraint("status IN ('JOINED','WAITING','INJECTING','INJECTED','TESTING','GRADUATED','FAILED')", name="group_member_status_chk"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    master_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("marketplace_masters.id", ondelete="CASCADE"), nullable=False, index=True)
+    bot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bots.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="JOINED")
+    is_master_clone: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    skill_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    inject_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)        # bot_message id or SKILL_INJECT request_id
+    test_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)          # bot_message id or task_id
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    injected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    graduated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GroupMessage(Base):
+    """The messenger-group feed of a Master Bot."""
+
+    __tablename__ = "master_group_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    master_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("marketplace_masters.id", ondelete="CASCADE"), nullable=False, index=True)
+    sender_type: Mapped[str] = mapped_column(String(10), nullable=False)                # master | bot | system
+    sender_bot_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("bots.id", ondelete="SET NULL"), nullable=True)
+    sender_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

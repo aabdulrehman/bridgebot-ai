@@ -26,7 +26,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import select
 from sqlalchemy.orm import attributes
 
-from .. import webhooks
+from .. import botnet, webhooks
 from ..audit import write_audit
 from ..config import get_settings
 from ..database import SessionLocal
@@ -152,17 +152,20 @@ async def connector_ws(ws: WebSocket) -> None:
                 continue
             if mtype == "HELLO":
                 await _upsert_agents(connector_id, msg.get("agents"))
+                botnet.spawn(botnet.resume_for_connector(connector_id))
             elif mtype == "SKILL_ACK":
                 await _record_skill(connector_id, msg)
                 if msg.get("ok"):
                     await webhooks.emit(user_id, "skill.injected", {
                         "connector_id": str(connector_id), "machine_name": conn.machine_name, "agent_name": msg.get("agent_name"),
                         "skill_id": msg.get("skill_id"), "training_request_id": msg.get("request_id"), "path": msg.get("path")})
+                botnet.spawn(botnet.on_connector_skill_ack(msg))
             elif mtype == "TASK_RESULT":
                 await webhooks.emit(user_id, "task.completed", {
                     "connector_id": str(connector_id), "machine_name": conn.machine_name, "task_id": msg.get("task_id"),
                     "exit_code": msg.get("exit_code"), "duration_ms": msg.get("duration_ms"), "error": msg.get("error"),
                     "stdout_tail": msg.get("stdout_tail", [])})
+                botnet.spawn(botnet.on_connector_task_result(msg))
 
             # Relay everything else to the owner's dashboards.
             await hub.broadcast_to_user(user_id, {**msg, "type": mtype, "connector_id": str(connector_id)})

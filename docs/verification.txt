@@ -1,70 +1,186 @@
-# BridgeBot AI verification log — 2026-10-17 17:52 +03
+BridgeBot AI — verification log (2026-10-17 18:52 +03)
 
-$ python tests/e2e_test.py   (SQLite)
-
-=== starting backend on http://127.0.0.1:40143
-health: {'ok': True, 'online_connectors': 0, 'llm': False}
-
-=== register + login
-login ok, balance = 10000
-
-=== create connector
-connector e37faddd-5a47-45fb-b11a-34a8cbea6de4 key prefix bbk_tD4P status OFFLINE
-dashboard snapshot: {'type': 'SNAPSHOT', 'connectors': [{'connector_id': 'e37faddd-5a47-45fb-b11a-34a8cbea6de4', 'machine_name': 'e2e-pc', 'status': 'OFFLINE'}]}
-
-=== bad API key is refused
-refused as expected: InvalidStatus
-
-=== start local_connector.py
-event: {'type': 'CONNECTOR_STATUS', 'connector_id': 'e37faddd-5a47-45fb-b11a-34a8cbea6de4', 'status': 'ONLINE', 'machine_name': 'e2e-pc'}
-HELLO from e2e-pc Linux 6.12.94+ / py3.13.5
-REST status: ONLINE agents: ['default']
-
-=== trigger task: echo
-LOG: stdout | Hello from BridgeBot e2e
-RESULT: exit 0 in 2 ms
-
-=== trigger task: multi-line + stderr (ls on missing path)
-STDERR: ls: cannot access '/definitely/missing/path': No such file or directory | exit 2
-
-=== trigger task: blocked command (python not allowlisted)
-RESULT: -1 'python3' is not in allowed_commands ['echo', 'ls', 'dir', 'pwd', 'whoami', 'hostname', 'uname', 'date', 'uptime', 'df', 'free', 'nvidia-smi', 'ollama', 'n8n', 'git', 'ping', 'docker', 'ps']
-
-=== training: submit -> READY
-status READY via template-fallback cost 977 skill_id skill_riyadh_homes_assistant_eefd617a
-tools: ['search_knowledge_base', 'capture_lead', 'schedule_follow_up', 'escalate_to_human']
-balance after training: 9023
-
-=== training: approve -> SKILL_INJECT -> SKILL_ACK
-SKILL_ACK: {'ok': True, 'agent_name': 'default', 'skill_id': 'skill_riyadh_homes_assistant_eefd617a', 'path': '/tmp/bridgebot_e2e_kinh8fgh/skills/default/skill_riyadh_homes_assistant_eefd617a.json'}
-skill file on disk: /tmp/bridgebot_e2e_kinh8fgh/skills/default/skill_riyadh_homes_assistant_eefd617a.json (5083 bytes)
-agent.current_injected_skills_json: [{'skill_id': 'skill_riyadh_homes_assistant_eefd617a', 'request_id': '9f01c64c-e81b-4cf3-a9cd-fbed089c14ed', 'path': '/tmp/bridgebot_e2e_kinh8fgh/skills/default/skill_riyadh_homes_assistant_eefd617a.json', 'injected_at': '2026-10-17T14:52:46.661828+00:00'}]
-audit events: ['CONNECTED', 'HELLO', 'SKILL_ACK', 'SKILL_INJECT_SENT', 'TASK_DISPATCHED', 'TASK_RESULT', 'TASK_STARTED']
-
-=== stop connector -> OFFLINE
-event: {'type': 'CONNECTOR_STATUS', 'connector_id': 'e37faddd-5a47-45fb-b11a-34a8cbea6de4', 'status': 'OFFLINE'}
-task to offline connector -> 409 Connector is OFFLINE
-
+## e2e (SQLite)
+=== starting backend on http://127.0.0.1:40489
+=== public endpoints
+  ✔ plans FREE/PRO/BUSINESS published
+  ✔ support WhatsApp in public config
+  ✔ local_connector.py downloadable
+=== register user → FREE plan auto-assigned
+  ✔ registered as FREE user
+  ✔ login (case-insensitive email)
+  ✔ wrong password → 401
+  ✔ FREE: 5,000 tokens, period set
+  ✔ normal user cannot open admin API
+=== plan limits on FREE
+  ✔ machine #1 created
+  ✔ machine #2 blocked on FREE (402: Free plan allows 1 machine(s). Upgrade to add more.)
+  ✔ personal API key #1 created
+  ✔ API key #2 blocked on FREE
+  ✔ outbound webhook #1 registered
+  ✔ webhook #2 blocked on FREE
+  ✔ invalid event rejected
+=== personal API key auth
+  ✔ bbu_ key works on REST API
+  ✔ X-API-Key header works
+  ✔ API key cannot reach admin
+=== bridge: start local_connector.py
+  ✔ bad connector key refused
+  ✔ dashboard got CONNECTOR_STATUS ONLINE
+  ✔ connector.online webhook HMAC signature valid
+=== bridge: tasks (via personal API key)
+  ✔ task dispatched with API key
+  ✔ stdout streamed live, exit 0
+  ✔ task.completed webhook carries stdout_tail
+  ✔ stderr streamed
+  ✔ non-allowlisted command blocked by daemon
+=== inbound webhook blocked on FREE
+  ✔ inbound hook on FREE → 402 (Inbound webhooks require Pro or Business (you are on Free).)
+=== upgrade request → WhatsApp → admin approval
+  ✔ PayPal request without transaction id rejected
+  ✔ PayPal upgrade request PENDING
+  ✔ PayPal.Me link https://paypal.me/BunnyOnMoney/19USD
+  ✔ WhatsApp link has plan + email
+  ✔ duplicate pending request rejected
+  ✔ status PENDING_UPGRADE
+  ✔ user cannot self-approve
+=== admin: only ADMIN_EMAIL (case-insensitive) is admin
+  ✔ another new account is NOT admin
+  ✔ ADMIN_EMAIL account got role=admin
+  ✔ admin sees pending PayPal request + txn id
+  ✔ admin approved → user on PRO
+  ✔ PRO active with 100,000 tokens
+  ✔ stats: revenue 1900¢, MRR 1900¢, online 1
+=== PRO limits lifted + inbound webhook
+  ✔ machine #2 allowed on PRO
+  ✔ webhook #2 allowed on PRO
+  ✔ inbound hook accepted on PRO
+  ✔ inbound-triggered task output streamed
+  ✔ unknown inbound token → 404
+=== webhook retries + delivery log
+  ✔ failed once (500) then retried → SUCCESS after 2 attempts
+  ✔ 'send test' delivery received
+=== training: submit → READY → approve → SKILL_ACK
+  ✔ READY via template-fallback cost 942
+  ✔ training.ready webhook
+  ✔ approved
+  ✔ SKILL_ACK ok, file skill_riyadh_homes_assistant_1d9ad5d7.json
+  ✔ skill.injected webhook
+  ✔ tokens_used_period tracked
+=== admin actions
+  ✔ admin user list shows online machine
+  ✔ token adjust +1234
+  ✔ admin changed plan → BUSINESS
+  ✔ user suspended
+  ✔ suspended user's API calls → 403
+  ✔ suspended user cannot log in
+  ✔ suspension kicked the live connector
+  ✔ user reactivated
+  ✔ connector auto-reconnected after reactivation
+  ✔ admin actions audited
+  ✔ PayPal payment recorded in revenue ledger
+  ✔ ban works
+  ✔ banned user blocked
+=== API key revoke
+  ✔ revoked
+  ✔ revoked key → 401
+=== marketplace: public catalogue + plan gating
+  ✔ 3 Master Bots published
+  ✔ plan gates FREE/PRO/BUSINESS
+=== Bot API: FREE user links a polling bot (Hermes)
+  ✔ bot registered → bbt_ token + signing secret
+  ✔ bot #2 blocked on FREE (402)
+  ✔ bad bot token → 401
+  ✔ GET /api/bot/me with bot token
+  ✔ owner → bot message queued
+  ✔ bot long-polled the owner message
+  ✔ bot replied via REST
+  ✔ owner sees the conversation thread
+  ✔ FREE user blocked from BUSINESS master (402)
+=== marketplace: polling bot joins Customer Support Master → automated onboarding
+  ✔ joined the master's group, onboarding started
+  ✔ master sent welcome + skill package (['message', 'welcome', 'skill_inject'])
+  ✔ skill payload carries skill_id + persona + tools
+  ✔ bot ACKed the skill
+  ✔ follow-up test task received
+  ✔ wrong answer → master coaches and re-tests
+  ✔ polling bot GRADUATED
+  ✔ GET /api/bot/skills returns the installed skill
+=== marketplace: webhook bot (n8n) → one-click 'Make my bot a master'
+  ✔ owner webhook for bot.* events
+  ✔ make-master accepted (PRO+ master on BUSINESS plan)
+  ✔ webhook bot auto-onboarded with zero manual steps → GRADUATED master clone
+  ✔ welcome, skill_inject and test pushed to the bot webhook
+  ✔ bot pushes HMAC-signed with the bot secret
+  ✔ bot now carries the master persona + skill
+  ✔ bot.onboarded owner webhook (signed)
+  ✔ bot.joined owner webhook
+=== marketplace: WebSocket bot (OpenClaw) + group chat + master auto-guide
+  ✔ bot WebSocket READY
+  ✔ WebSocket bot instantly onboarded → GRADUATED
+  ✔ master auto-guides questions in the group
+  ✔ group message relayed to the other member bot
+  ✔ group feed shows welcome → inject → graduation for both bots
+  ✔ member owner can read the group
+=== Python SDK adapter (bridgebot_sdk.py --exec, Hermes-style SKILL.md)
+  ✔ SDK installed the skill as Hermes/OpenClaw SKILL.md
+  ✔ SDK bot (CLI adapter) auto-onboarded → GRADUATED
+  ✔ owner message → CLI bot → reply (no shell)
+=== marketplace: connector bot → SKILL_INJECT over the bridge + real test task
+  ✔ BUSINESS master unlocked on BUSINESS plan
+  ✔ skill file written by the connector: master_sales_closer_elite.json
+  ✔ follow-up echo test task ran on the machine → GRADUATED
+  ✔ dashboard got ONBOARDING_STATUS GRADUATED
+=== admin: publish a Master Bot from a trained payload
+  ✔ non-admin cannot publish
+  ✔ published 'Riyadh Homes Assistant Master'
+  ✔ visible in public marketplace
+  ✔ FREE user gated from PRO master
+  ✔ unpublished → hidden
+  ✔ admin still sees the draft
+=== stop connector → OFFLINE
+  ✔ connector.offline webhook
+  ✔ task to offline connector → 409
 ✅ ALL E2E CHECKS PASSED
 
-$ E2E_DATABASE_URL=postgresql://...localhost/bridgebot python tests/e2e_test.py   (PostgreSQL 17, schema.sql applied)
-task to offline connector -> 409 Connector is OFFLINE
-
+## e2e (Postgres 17: bb_v1)
 ✅ ALL E2E CHECKS PASSED
+checks passed: 116
 
-$ python tests/test_master_bot.py
-Master bot model openrouter/free failed: OpenRouter openrouter/free HTTP 429: {"error":{"message":"rate limited"}}
-Master bot model openrouter/free failed: no JSON object in model output
-Master bot model google/gemma-4-31b-it:free failed: no JSON object in model output
-generator: openrouter:google/gemma-4-31b-it:free | cost: 1234 | skill_id: skill_clinic_concierge_4e73517e | models tried: ['openrouter/free', 'google/gemma-4-31b-it:free']
-all models bad -> generator: template-fallback | tools: 4
+## e2e (Postgres 17: bb_schema)
+✅ ALL E2E CHECKS PASSED
+checks passed: 116
+
+## e2e (Postgres 17: bb_empty)
+✅ ALL E2E CHECKS PASSED
+checks passed: 116
+
+## master bot unit tests
 ✅ master bot tests passed
 
-$ node ui.js  (headless Chrome, real UI against backend serving the PWA + real connector)
-registered via UI, token len 221
-key from UI: bbk_ZxDW4F…
-dashboard saw ONLINE
-console lines: 22
-preview READY in UI
-UI got SKILL_ACK: /tmp/ui_skills/default/skill_desert_tents_co_assistant_0aa74d05.json
-UI TEST PASSED
+## UI smoke (headless Chrome)
+✔ GET / 200
+✔ GET /pricing/ 200
+✔ GET /marketplace/ 200
+✔ GET /docs/ 200
+✔ GET /docs/connect/ 200
+✔ GET /docs/bots/ 200
+✔ GET /docs/marketplace/ 200
+✔ GET /docs/api/ 200
+✔ GET /docs/webhooks/ 200
+✔ public marketplace shows 3 masters
+✔ pricing PayPal buttons https://paypal.me/BunnyOnMoney/19USD https://paypal.me/BunnyOnMoney/79USD
+✔ WhatsApp links on pricing: 8
+✔ billing PayPal button https://paypal.me/BunnyOnMoney/19USD
+✔ submit PayPal button present
+✔ upgrade request pending shown
+✔ bot token shown once in UI
+✔ Make my bot a master button
+✔ one click → bot GRADUATED (welcome + inject + test automatic)
+✔ group feed shows graduation
+✔ bot shows cloned master persona + skill
+✔ admin marketplace tab lists masters + publish form
+✔ admin sees PayPal txn id
+✔ approve button
+✔ user upgraded to PRO by admin: PRO
+✔ no page errors 

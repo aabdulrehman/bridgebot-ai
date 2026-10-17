@@ -7,9 +7,10 @@ import { getToken } from "@/lib/api";
 
 const LINKS = [
   { href: "/#features", label: "Features" },
+  { href: "/marketplace/", label: "Marketplace" },
   { href: "/pricing/", label: "Pricing" },
   { href: "/docs/", label: "Docs" },
-  { href: "/docs/api/", label: "API" },
+  { href: "/docs/bots/", label: "Bot API" },
 ];
 
 export default function MarketingNav() {

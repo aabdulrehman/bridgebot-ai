@@ -9,7 +9,10 @@ const EVENTS = [
   ["connector.offline", "A machine disconnected.", '{"connector_id":"…","machine_name":"home-pc"}'],
   ["task.completed", "A remote task finished.", '{"task_id":"…","exit_code":0,"duration_ms":41,"error":null,"stdout_tail":["…"]}'],
   ["training.ready", "A skill finished compiling and awaits approval.", '{"training_request_id":"…","skill_id":"…","name":"…","token_cost":979}'],
-  ["skill.injected", "A skill was installed on your machine (SKILL_ACK).", '{"skill_id":"…","agent_name":"default","path":"…/skills/default/….json"}'],
+  ["skill.injected", "A skill was installed on your machine (SKILL_ACK) or into a linked bot.", '{"skill_id":"…","agent_name":"default","path":"…/skills/default/….json"}'],
+  ["bot.joined", "One of your bots joined a Master Bot group.", '{"bot_id":"…","bot_name":"hermes-helper","master":"customer-support-master","master_clone":false}'],
+  ["bot.onboarded", "The master finished welcome → inject → test and certified your bot.", '{"bot_id":"…","master":"…","skill_id":"master_…","master_clone":true}'],
+  ["bot.message", "A linked bot posted a message (direct or group).", '{"bot_id":"…","chat":"direct","group_id":null,"text":"…"}'],
 ];
 
 export default function WebhooksDocs() {
