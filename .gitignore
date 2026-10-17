@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.db
+.env
+.env.local
+node_modules/
+.next/
+frontend/out/
+connector/skills/
+connector/connector_config.json
+*.zip

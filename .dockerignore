@@ -1,0 +1,11 @@
+**/node_modules
+**/.next
+frontend/out
+**/.venv
+**/__pycache__
+**/*.db
+**/.env
+**/.env.local
+connector/skills
+.git
+*.zip

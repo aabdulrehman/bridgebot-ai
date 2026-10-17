@@ -1,0 +1,70 @@
+# BridgeBot AI verification log — 2026-10-17 17:52 +03
+
+$ python tests/e2e_test.py   (SQLite)
+
+=== starting backend on http://127.0.0.1:40143
+health: {'ok': True, 'online_connectors': 0, 'llm': False}
+
+=== register + login
+login ok, balance = 10000
+
+=== create connector
+connector e37faddd-5a47-45fb-b11a-34a8cbea6de4 key prefix bbk_tD4P status OFFLINE
+dashboard snapshot: {'type': 'SNAPSHOT', 'connectors': [{'connector_id': 'e37faddd-5a47-45fb-b11a-34a8cbea6de4', 'machine_name': 'e2e-pc', 'status': 'OFFLINE'}]}
+
+=== bad API key is refused
+refused as expected: InvalidStatus
+
+=== start local_connector.py
+event: {'type': 'CONNECTOR_STATUS', 'connector_id': 'e37faddd-5a47-45fb-b11a-34a8cbea6de4', 'status': 'ONLINE', 'machine_name': 'e2e-pc'}
+HELLO from e2e-pc Linux 6.12.94+ / py3.13.5
+REST status: ONLINE agents: ['default']
+
+=== trigger task: echo
+LOG: stdout | Hello from BridgeBot e2e
+RESULT: exit 0 in 2 ms
+
+=== trigger task: multi-line + stderr (ls on missing path)
+STDERR: ls: cannot access '/definitely/missing/path': No such file or directory | exit 2
+
+=== trigger task: blocked command (python not allowlisted)
+RESULT: -1 'python3' is not in allowed_commands ['echo', 'ls', 'dir', 'pwd', 'whoami', 'hostname', 'uname', 'date', 'uptime', 'df', 'free', 'nvidia-smi', 'ollama', 'n8n', 'git', 'ping', 'docker', 'ps']
+
+=== training: submit -> READY
+status READY via template-fallback cost 977 skill_id skill_riyadh_homes_assistant_eefd617a
+tools: ['search_knowledge_base', 'capture_lead', 'schedule_follow_up', 'escalate_to_human']
+balance after training: 9023
+
+=== training: approve -> SKILL_INJECT -> SKILL_ACK
+SKILL_ACK: {'ok': True, 'agent_name': 'default', 'skill_id': 'skill_riyadh_homes_assistant_eefd617a', 'path': '/tmp/bridgebot_e2e_kinh8fgh/skills/default/skill_riyadh_homes_assistant_eefd617a.json'}
+skill file on disk: /tmp/bridgebot_e2e_kinh8fgh/skills/default/skill_riyadh_homes_assistant_eefd617a.json (5083 bytes)
+agent.current_injected_skills_json: [{'skill_id': 'skill_riyadh_homes_assistant_eefd617a', 'request_id': '9f01c64c-e81b-4cf3-a9cd-fbed089c14ed', 'path': '/tmp/bridgebot_e2e_kinh8fgh/skills/default/skill_riyadh_homes_assistant_eefd617a.json', 'injected_at': '2026-10-17T14:52:46.661828+00:00'}]
+audit events: ['CONNECTED', 'HELLO', 'SKILL_ACK', 'SKILL_INJECT_SENT', 'TASK_DISPATCHED', 'TASK_RESULT', 'TASK_STARTED']
+
+=== stop connector -> OFFLINE
+event: {'type': 'CONNECTOR_STATUS', 'connector_id': 'e37faddd-5a47-45fb-b11a-34a8cbea6de4', 'status': 'OFFLINE'}
+task to offline connector -> 409 Connector is OFFLINE
+
+✅ ALL E2E CHECKS PASSED
+
+$ E2E_DATABASE_URL=postgresql://...localhost/bridgebot python tests/e2e_test.py   (PostgreSQL 17, schema.sql applied)
+task to offline connector -> 409 Connector is OFFLINE
+
+✅ ALL E2E CHECKS PASSED
+
+$ python tests/test_master_bot.py
+Master bot model openrouter/free failed: OpenRouter openrouter/free HTTP 429: {"error":{"message":"rate limited"}}
+Master bot model openrouter/free failed: no JSON object in model output
+Master bot model google/gemma-4-31b-it:free failed: no JSON object in model output
+generator: openrouter:google/gemma-4-31b-it:free | cost: 1234 | skill_id: skill_clinic_concierge_4e73517e | models tried: ['openrouter/free', 'google/gemma-4-31b-it:free']
+all models bad -> generator: template-fallback | tools: 4
+✅ master bot tests passed
+
+$ node ui.js  (headless Chrome, real UI against backend serving the PWA + real connector)
+registered via UI, token len 221
+key from UI: bbk_ZxDW4F…
+dashboard saw ONLINE
+console lines: 22
+preview READY in UI
+UI got SKILL_ACK: /tmp/ui_skills/default/skill_desert_tents_co_assistant_0aa74d05.json
+UI TEST PASSED

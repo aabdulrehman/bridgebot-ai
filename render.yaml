@@ -1,0 +1,27 @@
+# Render Blueprint — New + > Blueprint > select this repo. Free plan, $0.
+# One web service serves API + WebSockets (/ws/connect, /ws/dashboard) + the PWA.
+services:
+  - type: web
+    name: bridgebot-ai
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: JWT_SECRET
+        generateValue: true          # Render generates a strong random secret
+      # Strongly recommended: Supabase free Postgres (Session pooler URL, port 5432).
+      # Without it the SQLite fallback is used, which is WIPED on every redeploy/restart
+      # because Render free instances have an ephemeral filesystem.
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENROUTER_API_KEY      # optional — free models; empty => template compiler
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openrouter/free
+      - key: CORS_ORIGINS            # add your Vercel URL if you host the frontend there
+        value: "*"
