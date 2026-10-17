@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     webhook_max_attempts: int = 5
     webhook_retry_base_s: float = 30.0   # backoff: base * 4^(attempt-1)
     webhook_timeout_s: float = 10.0
+    # ---- HTTP tunnels (/t/{slug}/…) ----
+    tunnel_timeout_s: float = 30.0
+    tunnel_max_body_bytes: int = 8 * 1024 * 1024        # request and response bodies (base64 over the WS)
     public_base_url: str = ""          # e.g. https://bridgebot-ai.onrender.com (used in docs/examples)
 
     # --- Bridge ---------------------------------------------------------------

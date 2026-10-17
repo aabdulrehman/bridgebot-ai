@@ -11,7 +11,7 @@ const ok = (c, m) => { if (!c) { console.error("✘ " + m); process.exit(1); } c
   const b = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox"] });
   const p = await b.newPage(); await p.setViewport({ width: 1280, height: 900 });
   const errs = []; p.on("pageerror", (e) => errs.push(p.url() + " " + e.message.slice(0, 60)));
-  for (const u of ["/", "/pricing/", "/marketplace/", "/docs/", "/docs/connect/", "/docs/bots/", "/docs/marketplace/", "/docs/api/", "/docs/webhooks/"]) {
+  for (const u of ["/", "/pricing/", "/marketplace/", "/docs/", "/docs/connect/", "/docs/bots/", "/docs/marketplace/", "/docs/api/", "/docs/tunnels/", "/docs/webhooks/"]) {
     const r = await p.goto(BASE + u, { waitUntil: "networkidle0" }); ok(r.status() === 200, `GET ${u} 200`);
   }
   await p.goto(BASE + "/marketplace/", { waitUntil: "networkidle0" });
@@ -57,6 +57,33 @@ const ok = (c, m) => { if (!c) { console.error("✘ " + m); process.exit(1); } c
   await p.goto(BASE + "/bots/", { waitUntil: "networkidle0" });
   await p.waitForFunction(() => document.body.innerText.includes("Master persona"), { timeout: 10000 });
   ok(true, "bot shows cloned master persona + skill");
+  // tunnels: real connector + real local http.server, created through the UI
+  const fs = require("fs"); const os = require("os");
+  const site = fs.mkdtempSync(path.join(os.tmpdir(), "bbsite-")); fs.writeFileSync(path.join(site, "index.html"), "<h1>hello from my laptop</h1>");
+  const lport = 18000 + Math.floor(Math.random() * 1000);
+  const web = spawn("python3", ["-m", "http.server", String(lport), "--bind", "127.0.0.1", "--directory", site], { stdio: "ignore" });
+  const created = await p.evaluate(async (base) => {
+    const t = localStorage.getItem("bridgebot_token");
+    const r = await fetch(base + "/api/connectors", { method: "POST", headers: { Authorization: "Bearer " + t, "Content-Type": "application/json" }, body: JSON.stringify({ machine_name: "ui-laptop" }) });
+    return r.json();
+  }, BASE);
+  ok(created.api_key && created.api_key.startsWith("bbk_"), "connector created for tunnel test");
+  const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "bbconn-"));
+  const conn = spawn("python3", [path.join(__dirname, "..", "connector", "local_connector.py"), "--server", BASE, "--api-key", created.api_key, "--machine-name", "ui-laptop", "--config", path.join(cfgDir, "c.json"), "--skills-dir", path.join(cfgDir, "skills")], { stdio: "ignore" });
+  await p.goto(BASE + "/tunnels/", { waitUntil: "networkidle0" });
+  await p.waitForFunction(() => document.querySelector("select option") && document.body.innerText.includes("New tunnel"), { timeout: 15000 });
+  await p.waitForFunction(() => [...document.querySelectorAll("select option")].some((o) => o.textContent.includes("🟢")), { timeout: 20000 }).catch(() => {});
+  const portInput = await p.$("input[type=number]"); await portInput.click({ clickCount: 3 }); await portInput.type(String(lport));
+  const [mk] = await p.$$("xpath/.//button[normalize-space(.)='Create tunnel']"); await mk.click();
+  await p.waitForSelector("[data-tunnel] a[href*='/t/']", { timeout: 10000 });
+  const turl = await p.$eval("[data-tunnel] a[href*='/t/']", (a) => a.href);
+  ok(/\/t\/[a-z0-9-]+\/$/.test(turl), "tunnel created in UI → " + turl);
+  await p.waitForFunction(() => document.body.innerText.includes("ONLINE"), { timeout: 20000 });
+  await p.screenshot({ path: SHOTS + "/tunnels.png", fullPage: true });
+  const tp = await b.newPage(); const tr = await tp.goto(turl, { waitUntil: "load" });
+  const tbody = await tp.evaluate(() => document.body.innerText);
+  ok(tr.status() === 200 && tbody.includes("hello from my laptop"), "public tunnel URL serves the local http.server page");
+  await tp.close(); conn.kill(); web.kill();
   // admin
   await p.evaluate(() => localStorage.clear());
   await p.goto(BASE + "/login/", { waitUntil: "networkidle0" });

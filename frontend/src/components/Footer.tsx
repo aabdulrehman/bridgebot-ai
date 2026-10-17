@@ -40,6 +40,7 @@ export default function Footer() {
             <li><Link href="/docs/connect/" className="hover:text-white">Connect your machine</Link></li>
             <li><Link href="/docs/bots/" className="hover:text-white">Bot API &amp; adapters</Link></li>
             <li><Link href="/docs/api/" className="hover:text-white">API reference</Link></li>
+            <li><Link href="/docs/tunnels/" className="hover:text-white">HTTP tunnels</Link></li>
             <li><Link href="/docs/webhooks/" className="hover:text-white">Webhooks</Link></li>
           </ul>
         </div>

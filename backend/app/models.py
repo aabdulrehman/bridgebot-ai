@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -41,6 +41,7 @@ class Plan(Base):
     training_access: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     inbound_webhooks: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     max_bots: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))  # Bot API / marketplace bots
+    max_tunnels: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))  # HTTP tunnels
     features_json: Mapped[Any] = mapped_column(JSONType, nullable=False, default=list)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -372,4 +373,26 @@ class GroupMessage(Base):
     sender_bot_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("bots.id", ondelete="SET NULL"), nullable=True)
     sender_name: Mapped[str] = mapped_column(String(160), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Tunnel(Base):
+    """Public HTTP tunnel: https://<host>/t/{slug}/… → connector → http://127.0.0.1:{local_port}/…"""
+
+    __tablename__ = "tunnels"
+    __table_args__ = (CheckConstraint("local_port BETWEEN 1 AND 65535", name="tunnels_port_chk"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    connector_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("connectors.id", ondelete="CASCADE"), nullable=False, index=True)
+    slug: Mapped[str] = mapped_column(String(48), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    local_port: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)      # optional access token (SHA-256)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    requests_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    bytes_in: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    bytes_out: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

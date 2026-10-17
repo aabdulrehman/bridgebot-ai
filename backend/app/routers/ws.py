@@ -150,7 +150,11 @@ async def connector_ws(ws: WebSocket) -> None:
                 await hub.send_to_connector(connector_id, {"type": "PONG", "ts": msg.get("ts")})
                 await _set_status(connector_id, "ONLINE")
                 continue
+            if mtype == "TUNNEL_RESPONSE":
+                hub.resolve_tunnel(connector_id, msg)   # never relayed/audited: bodies can be large
+                continue
             if mtype == "HELLO":
+                session.features = {str(f) for f in (msg.get("features") or []) if isinstance(f, str)}
                 await _upsert_agents(connector_id, msg.get("agents"))
                 botnet.spawn(botnet.resume_for_connector(connector_id))
             elif mtype == "SKILL_ACK":
@@ -176,6 +180,7 @@ async def connector_ws(ws: WebSocket) -> None:
     except Exception as exc:  # noqa: BLE001
         log.exception("connector %s socket error: %s", connector_id, exc)
     finally:
+        hub.fail_tunnels(connector_id)
         if await hub.unregister_connector(connector_id, ws):
             await _set_status(connector_id, "OFFLINE", heartbeat=False)
             await hub.broadcast_to_user(user_id, {"type": "CONNECTOR_STATUS", "connector_id": str(connector_id), "status": "OFFLINE"})

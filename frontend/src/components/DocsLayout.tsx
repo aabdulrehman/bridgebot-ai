@@ -11,6 +11,7 @@ const PAGES = [
   { href: "/docs/bots/", label: "Bot API & adapters" },
   { href: "/docs/marketplace/", label: "Marketplace & Master Bots" },
   { href: "/docs/api/", label: "API reference" },
+  { href: "/docs/tunnels/", label: "HTTP tunnels" },
   { href: "/docs/webhooks/", label: "Webhooks" },
 ];
 

@@ -60,6 +60,7 @@ export interface Plan {
   max_webhooks: number;
   max_api_keys: number;
   max_bots?: number;
+  max_tunnels?: number;
   training_access: boolean;
   inbound_webhooks: boolean;
   features_json: string[];
@@ -188,4 +189,23 @@ export interface Membership {
   id: string; master_id: string; master: string | null; bot_id: string; bot: string | null; status: string;
   master_clone: boolean; skill_id: string | null; error?: string | null; joined_at: string; graduated_at: string | null;
   mine?: boolean; framework?: string | null;
+}
+
+export interface Tunnel {
+  id: string;
+  slug: string;
+  name: string;
+  connector_id: string;
+  machine_name: string | null;
+  local_port: number;
+  protected: boolean;
+  is_active: boolean;
+  online: boolean;
+  public_url: string;
+  requests_count: number;
+  bytes_in: number;
+  bytes_out: number;
+  last_status: number | null;
+  last_used_at: string | null;
+  created_at: string;
 }

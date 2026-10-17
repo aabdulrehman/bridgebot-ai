@@ -40,6 +40,7 @@ class PlanOut(BaseModel):
     max_webhooks: int
     max_api_keys: int
     max_bots: int = 1
+    max_tunnels: int = 1
     training_access: bool
     inbound_webhooks: bool
     features_json: Any

@@ -137,6 +137,16 @@ Commands run without a shell (`{text}` is one argv element); skills are written 
 Render free has **no persistent disk**: the SQLite fallback (`/data/bridgebot.db`) is wiped on every deploy/restart, including accounts and the admin. For real use set `DATABASE_URL` to the Supabase **Session pooler** URI (see the deployment guide) and run `db/schema.sql` once (idempotent; the app also auto-creates/migrates missing tables and columns on start).
 
 ---
+## 🌐 HTTP tunnels (ngrok-style, free)
+
+Expose any local port through your connector: `https://bridgebot-ai.onrender.com/t/{slug}/{path}` → cloud → connector WebSocket (`TUNNEL_REQUEST` / `TUNNEL_RESPONSE`, base64 bodies, request ids) → `http://127.0.0.1:{port}/{path}` on your machine.
+
+- Dashboard → **Tunnels**: pick machine + local port, optional slug and `tnl_` access token (header `X-Tunnel-Token` or `?tunnel_token=`), pause/resume, rotate, usage stats.
+- All methods, query strings, headers (+ `X-Forwarded-*`), multiple `Set-Cookie`, binary bodies; redirects rewritten into the tunnel. Limits: 8 MB request / 8 MB response / 30 s.
+- Error pages: 404 unknown, 401 token, 503 paused, 502 machine offline or nothing listening, 504 timeout, 413 too large.
+- Plans: Free 1 · Pro 5 · Business 20. Connector v1.1.0+; `--tunnel-ports 5678,8000` restricts ports, `--no-tunnels` disables.
+- n8n: `WEBHOOK_URL=https://bridgebot-ai.onrender.com/t/my-n8n/ n8n start` → webhooks at `/t/my-n8n/webhook/...`. Full guide: `/docs/tunnels/`.
+
 ## Repository layout
 
 ```

@@ -1,7 +1,7 @@
-BridgeBot AI — verification log (2026-10-17 18:52 +03)
+BridgeBot AI — verification log (2026-10-17 19:22 +03, Asia/Riyadh)
 
 ## e2e (SQLite)
-=== starting backend on http://127.0.0.1:40489
+=== starting backend on http://127.0.0.1:58325
 === public endpoints
   ✔ plans FREE/PRO/BUSINESS published
   ✔ support WhatsApp in public config
@@ -34,6 +34,35 @@ BridgeBot AI — verification log (2026-10-17 18:52 +03)
   ✔ task.completed webhook carries stdout_tail
   ✔ stderr streamed
   ✔ non-allowlisted command blocked by daemon
+=== HTTP tunnel: /t/{slug}/… → connector → real local http.server
+  ✔ tunnel created (unprotected)
+  ✔ public URL http://127.0.0.1:58325/t/e2e-app-8a0ae2/ · machine online
+  ✔ tunnel #2 blocked on FREE (402)
+  ✔ GET path+query forwarded verbatim (/hello/w%C3%B6rld%20x?x=1&y=two%20words)
+  ✔ request headers + X-Forwarded-* forwarded, Host rewritten
+  ✔ response tagged X-BridgeBot-Tunnel
+  ✔ POST JSON body forwarded
+  ✔ binary POST round-trip byte-exact (300256 bytes)
+  ✔ binary GET 1 MiB byte-exact
+  ✔ PUT forwarded
+  ✔ DELETE → 204
+  ✔ HEAD → 200, no body
+  ✔ redirect Location rewritten into the tunnel
+  ✔ multiple Set-Cookie + custom response headers preserved
+  ✔ bare /t/{slug} → 307 to trailing slash
+  ✔ slow local service → 504 page after 2.0s (got 504)
+  ✔ unknown slug → 404 page
+  ✔ request > 8 MB → 413
+=== HTTP tunnel: access token, pause, wrong port
+  ✔ access token enabled (tnl_…)
+  ✔ no token → 401 page
+  ✔ wrong token → 401
+  ✔ X-Tunnel-Token works and is not forwarded
+  ✔ ?tunnel_token= works and is stripped from the query
+  ✔ paused tunnel → 503
+  ✔ closed local port → 502 page
+  ✔ usage stats: 13 requests, 1350752 bytes out
+  ✔ (machine limit still enforced)
 === inbound webhook blocked on FREE
   ✔ inbound hook on FREE → 402 (Inbound webhooks require Pro or Business (you are on Free).)
 === upgrade request → WhatsApp → admin approval
@@ -141,50 +170,16 @@ BridgeBot AI — verification log (2026-10-17 18:52 +03)
 === stop connector → OFFLINE
   ✔ connector.offline webhook
   ✔ task to offline connector → 409
+  ✔ tunnel with machine offline → 502 'Tunnel offline' page
 ✅ ALL E2E CHECKS PASSED
 
-## e2e (Postgres 17: bb_v1)
-✅ ALL E2E CHECKS PASSED
-checks passed: 116
+## e2e (PostgreSQL 17)
+bb_v1: 144 checks — ✅ ALL E2E CHECKS PASSED
+bb_schema: 144 checks — ✅ ALL E2E CHECKS PASSED
+bb_empty: 144 checks — ✅ ALL E2E CHECKS PASSED
+(bb_v1 = initial 661e652 schema auto-migrated; bb_schema = db/schema.sql; bb_empty = created by the app)
 
-## e2e (Postgres 17: bb_schema)
-✅ ALL E2E CHECKS PASSED
-checks passed: 116
-
-## e2e (Postgres 17: bb_empty)
-✅ ALL E2E CHECKS PASSED
-checks passed: 116
-
-## master bot unit tests
+## tests/test_master_bot.py
 ✅ master bot tests passed
 
-## UI smoke (headless Chrome)
-✔ GET / 200
-✔ GET /pricing/ 200
-✔ GET /marketplace/ 200
-✔ GET /docs/ 200
-✔ GET /docs/connect/ 200
-✔ GET /docs/bots/ 200
-✔ GET /docs/marketplace/ 200
-✔ GET /docs/api/ 200
-✔ GET /docs/webhooks/ 200
-✔ public marketplace shows 3 masters
-✔ pricing PayPal buttons https://paypal.me/BunnyOnMoney/19USD https://paypal.me/BunnyOnMoney/79USD
-✔ WhatsApp links on pricing: 8
-✔ billing PayPal button https://paypal.me/BunnyOnMoney/19USD
-✔ submit PayPal button present
-✔ upgrade request pending shown
-✔ bot token shown once in UI
-✔ Make my bot a master button
-✔ one click → bot GRADUATED (welcome + inject + test automatic)
-✔ group feed shows graduation
-✔ bot shows cloned master persona + skill
-✔ admin marketplace tab lists masters + publish form
-✔ admin sees PayPal txn id
-✔ approve button
-✔ user upgraded to PRO by admin: PRO
-✔ no page errors 
-
-## Live site (https://bridgebot-ai.onrender.com) — 2026-10-17 18:56 +03
-All 25 checked pages/endpoints returned 200 (/, /pricing/, /marketplace/, /marketplace/group/, /docs/*, /login/, /dashboard/, /bots/, /train/, /webhooks/, /api-keys/, /billing/, /admin/, /api/plans, /api/public-config, /api/marketplace, /healthz, /downloads/local_connector.py, /downloads/bridgebot_sdk.py).
-Live flow with test account livetest_c310e9@example.com: register → FREE · link poll bot · bridgebot_sdk.py (--exec) running on a separate box · make-master Customer Support Master → GRADUATED in seconds · SKILL.md written · Business master → 402.
+## UI smoke (headless Chrome, tests/ui_saas_smoke.js): 29 checks passed incl. tunnel created in UI serving a real python http.server page

@@ -5,6 +5,7 @@ import PlanCards from "@/components/PlanCards";
 
 const BRIDGE_FEATURES = [
   { icon: "🛰️", title: "Remote control room", text: "Send tasks to your home/office PC from your phone. No port forwarding, no static IP — the connector dials out over secure WebSockets." },
+  { icon: "🌐", title: "Free HTTP tunnels", text: "ngrok-style public URLs (/t/your-slug/) to any local port — n8n webhooks, Ollama, dev servers — with optional access tokens." },
   { icon: "📜", title: "Live stdout/stderr", text: "Watch every log line stream in real time, with exit codes, durations and a searchable audit history." },
   { icon: "🔐", title: "Safe by design", text: "Hashed API keys, command allowlist, no shell execution, timeouts and output caps on the local daemon." },
   { icon: "♻️", title: "Always reconnecting", text: "Heartbeats + exponential backoff keep the tunnel alive across Wi-Fi drops, sleeps and server restarts." },

@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import http.client
 import json
 import logging
 import os
@@ -53,7 +55,7 @@ except ImportError:  # pragma: no cover — legacy websockets < 13
 
     _HEADER_KW = "extra_headers"
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 IS_WINDOWS = os.name == "nt"
 log = logging.getLogger("bridgebot.connector")
 
@@ -91,6 +93,11 @@ class ConnectorConfig:
     # Optional: local HTTP endpoint (e.g. an n8n webhook) to POST injected skills to.
     skill_hook_url: Optional[str] = None
     agents: List[Dict[str, str]] = field(default_factory=lambda: [{"name": "default", "type": "generic"}])
+    # HTTP tunnels: the cloud forwards https://<host>/t/{slug}/… to http://127.0.0.1:<port>/… on THIS machine.
+    tunnels_enabled: bool = True
+    allowed_tunnel_ports: Optional[List[int]] = None     # e.g. [5678, 8080]; None = any port you create a tunnel for
+    tunnel_host: str = "127.0.0.1"                       # only loopback by default
+    max_concurrent_tunnel_requests: int = 16
 
     @property
     def ws_url(self) -> str:
@@ -114,6 +121,8 @@ def load_config(argv: Optional[List[str]] = None) -> ConnectorConfig:
     p.add_argument("--machine-name")
     p.add_argument("--skills-dir")
     p.add_argument("--allow-any-command", action="store_true", help="DANGEROUS: disable the command allowlist")
+    p.add_argument("--no-tunnels", action="store_true", help="refuse HTTP tunnel requests on this machine")
+    p.add_argument("--tunnel-ports", help="comma-separated local ports tunnels may reach, e.g. 5678,8080")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -152,6 +161,11 @@ def load_config(argv: Optional[List[str]] = None) -> ConnectorConfig:
         cfg.skills_dir = args.skills_dir
     if args.allow_any_command:
         cfg.allow_any_command = True
+    if args.no_tunnels or os.getenv("BRIDGEBOT_NO_TUNNELS", "").lower() in ("1", "true", "yes"):
+        cfg.tunnels_enabled = False
+    ports = args.tunnel_ports or os.getenv("BRIDGEBOT_TUNNEL_PORTS")
+    if ports:
+        cfg.allowed_tunnel_ports = [int(x) for x in str(ports).split(",") if x.strip()]
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -176,6 +190,7 @@ class LocalConnector:
         self._procs: Dict[str, asyncio.subprocess.Process] = {}
         self._jobs: set[asyncio.Task[None]] = set()
         self._stop = asyncio.Event()
+        self._tunnel_slots = asyncio.Semaphore(cfg.max_concurrent_tunnel_requests)
 
     # ------------------------------------------------------------------ transport
     async def send(self, message: Dict[str, Any]) -> bool:
@@ -201,7 +216,7 @@ class LocalConnector:
             try:
                 log.info("connecting to %s ...", url)
                 async with ws_connect(url, **{_HEADER_KW: headers}, ping_interval=20, ping_timeout=20,
-                                      max_size=8 * 1024 * 1024, open_timeout=30) as ws:
+                                      max_size=32 * 1024 * 1024, open_timeout=30) as ws:
                     self.ws = ws
                     attempt = 0  # reset backoff after a successful handshake
                     await self._on_open()
@@ -245,6 +260,7 @@ class LocalConnector:
             "platform": f"{platform.system()} {platform.release()} / py{platform.python_version()}",
             "agents": self.cfg.agents,
             "allowed_commands": "*" if self.cfg.allow_any_command else self.cfg.allowed_commands,
+            "features": ["tasks", "skills"] + (["tunnel"] if self.cfg.tunnels_enabled else []),
         })
 
     async def _heartbeat_loop(self) -> None:
@@ -274,6 +290,8 @@ class LocalConnector:
                 _kill(proc)
         elif mtype == "SKILL_INJECT":
             self._spawn(self._handle_skill(msg))
+        elif mtype == "TUNNEL_REQUEST":
+            self._spawn(self._handle_tunnel(msg))
         elif mtype == "ERROR":
             log.error("cloud error: %s", msg.get("error"))
         else:
@@ -378,6 +396,66 @@ class LocalConnector:
                 tail.append(line)
                 del tail[:-50]
             await self.send({"type": "LOG", "task_id": task_id, "stream": stream, "line": line, "ts": time.time()})
+
+    # ------------------------------------------------------------------ HTTP tunnel
+    async def _handle_tunnel(self, msg: Dict[str, Any]) -> None:
+        """Proxy one HTTP request from the cloud to a local port and send TUNNEL_RESPONSE."""
+        rid = msg.get("request_id")
+        resp: Dict[str, Any] = {"type": "TUNNEL_RESPONSE", "request_id": rid}
+        async with self._tunnel_slots:
+            try:
+                if not self.cfg.tunnels_enabled:
+                    raise PermissionError("tunnels are disabled on this machine (--no-tunnels)")
+                port = int(msg.get("port", 0))
+                if not 1 <= port <= 65535:
+                    raise ValueError("invalid port")
+                if self.cfg.allowed_tunnel_ports and port not in self.cfg.allowed_tunnel_ports:
+                    raise PermissionError(f"port {port} is not in allowed_tunnel_ports {self.cfg.allowed_tunnel_ports}")
+                path = str(msg.get("path") or "/")
+                if not path.startswith("/") or path.startswith("//") or any(c in path for c in "\r\n "):
+                    raise ValueError("invalid path")
+                method = str(msg.get("method") or "GET").upper()
+                if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+                    raise ValueError(f"method {method} not allowed")
+                body = base64.b64decode(msg.get("body_b64") or "")
+                status, headers, data = await asyncio.to_thread(
+                    self._local_http, port, method, path, msg.get("headers") or [], body,
+                    float(msg.get("timeout_s") or 30), int(msg.get("max_response_bytes") or 8 * 1024 * 1024))
+                resp.update(status=status, headers=headers, body_b64=base64.b64encode(data).decode())
+                log.info("🌐 tunnel %s %s → :%d %s (%d bytes)", method, path[:80], port, status, len(data))
+            except PermissionError as exc:
+                resp.update(status=403, error=str(exc))
+            except ConnectionRefusedError:
+                resp.update(status=502, error=f"nothing is listening on {self.cfg.tunnel_host}:{msg.get('port')}")
+            except (TimeoutError, socket.timeout):
+                resp.update(status=504, error="local service timed out")
+            except OverflowError as exc:
+                resp.update(status=502, error=str(exc))
+            except Exception as exc:  # noqa: BLE001
+                resp.update(status=502, error=f"{type(exc).__name__}: {exc}")
+        await self.send(resp)
+
+    def _local_http(self, port: int, method: str, path: str, headers: List[List[str]], body: bytes,
+                    timeout: float, max_bytes: int) -> "tuple[int, List[List[str]], bytes]":
+        conn = http.client.HTTPConnection(self.cfg.tunnel_host, port, timeout=timeout)
+        try:
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            conn.putheader("Host", f"localhost:{port}")
+            for pair in headers:
+                k, v = str(pair[0]), str(pair[1])
+                if k.lower() in ("host", "content-length", "connection", "transfer-encoding"):
+                    continue
+                conn.putheader(k, v)
+            if body or method in ("POST", "PUT", "PATCH"):
+                conn.putheader("Content-Length", str(len(body)))
+            conn.endheaders(body or None)
+            r = conn.getresponse()
+            data = r.read(max_bytes + 1) if method != "HEAD" else b""
+            if len(data) > max_bytes:
+                raise OverflowError(f"local response exceeds {max_bytes // (1024 * 1024)} MB tunnel limit")
+            return r.status, [[k, v] for k, v in r.getheaders()], data
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------ skills
     async def _handle_skill(self, msg: Dict[str, Any]) -> None:

@@ -31,12 +31,14 @@ CREATE TABLE IF NOT EXISTS plans (
     is_active            BOOLEAN     NOT NULL DEFAULT TRUE
 );
 ALTER TABLE plans ADD COLUMN IF NOT EXISTS max_bots INTEGER NOT NULL DEFAULT 1;   -- Universal Bot API limit
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS max_tunnels INTEGER NOT NULL DEFAULT 1;  -- HTTP tunnel limit
 INSERT INTO plans (id, name, price_monthly_cents, currency, monthly_tokens, max_machines, max_tasks_per_day,
-                   max_webhooks, max_api_keys, training_access, inbound_webhooks, features_json, sort_order, is_active, max_bots) VALUES
-    ('FREE',     'Free',        0, 'USD',   5000,  1,   50,  1,  1, TRUE, FALSE, '[]'::jsonb, 0, TRUE,  1),
-    ('PRO',      'Pro',      1900, 'USD', 100000,  5, 1000, 10,  5, TRUE, TRUE,  '[]'::jsonb, 1, TRUE, 10),
-    ('BUSINESS', 'Business', 7900, 'USD', 500000, 25,   -1, 50, 20, TRUE, TRUE,  '[]'::jsonb, 2, TRUE, 50)
+                   max_webhooks, max_api_keys, training_access, inbound_webhooks, features_json, sort_order, is_active, max_bots, max_tunnels) VALUES
+    ('FREE',     'Free',        0, 'USD',   5000,  1,   50,  1,  1, TRUE, FALSE, '[]'::jsonb, 0, TRUE,  1,  1),
+    ('PRO',      'Pro',      1900, 'USD', 100000,  5, 1000, 10,  5, TRUE, TRUE,  '[]'::jsonb, 1, TRUE, 10,  5),
+    ('BUSINESS', 'Business', 7900, 'USD', 500000, 25,   -1, 50, 20, TRUE, TRUE,  '[]'::jsonb, 2, TRUE, 50, 20)
 ON CONFLICT (id) DO NOTHING;
+UPDATE plans SET max_tunnels = CASE id WHEN 'PRO' THEN 5 WHEN 'BUSINESS' THEN 20 ELSE 1 END WHERE id IN ('FREE','PRO','BUSINESS');
 
 -- -----------------------------------------------------------------------------
 -- users: platform accounts. token_balance = platform credits used by Service 2.
@@ -354,6 +356,28 @@ CREATE TABLE IF NOT EXISTS master_group_messages (
 CREATE INDEX IF NOT EXISTS ix_master_group_messages_master_id ON master_group_messages (master_id);
 
 -- -----------------------------------------------------------------------------
+-- HTTP tunnels (ngrok-style): https://<host>/t/{slug}/… → connector WS → 127.0.0.1:{local_port}
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tunnels (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    connector_id   UUID NOT NULL REFERENCES connectors (id) ON DELETE CASCADE,
+    slug           VARCHAR(48)  NOT NULL UNIQUE,              -- public path segment /t/{slug}/
+    name           VARCHAR(120) NOT NULL DEFAULT '',
+    local_port     INTEGER      NOT NULL CONSTRAINT tunnels_port_chk CHECK (local_port BETWEEN 1 AND 65535),
+    token_hash     VARCHAR(64),                               -- SHA-256 of optional tnl_ access token
+    is_active      BOOLEAN      NOT NULL DEFAULT TRUE,
+    requests_count INTEGER      NOT NULL DEFAULT 0,
+    bytes_in       BIGINT       NOT NULL DEFAULT 0,
+    bytes_out      BIGINT       NOT NULL DEFAULT 0,
+    last_status    INTEGER,
+    last_used_at   TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_tunnels_user_id      ON tunnels (user_id);
+CREATE INDEX IF NOT EXISTS ix_tunnels_connector_id ON tunnels (connector_id);
+
+-- -----------------------------------------------------------------------------
 -- Seed: built-in free master bot.
 -- -----------------------------------------------------------------------------
 INSERT INTO master_bots (bot_name, description, pricing_tier, skill_payload_json)
@@ -382,3 +406,4 @@ ALTER TABLE bots                  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bot_messages          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE master_group_members  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE master_group_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tunnels               ENABLE ROW LEVEL SECURITY;

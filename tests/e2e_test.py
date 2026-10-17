@@ -130,6 +130,70 @@ def verify_sig(secret: str, body: bytes, header: str) -> bool:
     return hmac.compare_digest(mac, parts["v1"])
 
 
+# ----------------------------------------------------------------------------- local app behind a tunnel
+BINARY = bytes(range(256)) * 4096  # 1 MiB, every byte value
+
+
+class LocalApp:
+    """A real http.server on 127.0.0.1 that the tunnel forwards to."""
+
+    def __init__(self) -> None:
+        self.port = free_port()
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _send(self, code: int, body: bytes, ctype: str = "application/json", extra: Optional[List[tuple]] = None) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                for k, v in extra or []:
+                    self.send_header(k, v)
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+
+            def _info(self, body: bytes = b"") -> bytes:
+                return json.dumps({"method": self.command, "path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
+                                   "body_len": len(body), "body": body.decode("utf-8", "replace")[:2000]}).encode()
+
+            def _body(self) -> bytes:
+                n = int(self.headers.get("content-length") or 0)
+                return self.rfile.read(n) if n else b""
+
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path.startswith("/binary"):
+                    return self._send(200, BINARY, "application/octet-stream")
+                if self.path.startswith("/redirect"):
+                    return self._send(302, b"", "text/plain", [("Location", "/hello?from=redirect")])
+                if self.path.startswith("/slow"):
+                    time.sleep(4)
+                    return self._send(200, b"late")
+                if self.path.startswith("/cookies"):
+                    return self._send(200, b"{}", extra=[("Set-Cookie", "a=1; Path=/"), ("Set-Cookie", "b=2; Path=/"), ("X-Local-App", "yes")])
+                return self._send(200, self._info())
+
+            do_HEAD = do_GET  # noqa: N815
+
+            def do_POST(self) -> None:  # noqa: N802
+                body = self._body()
+                if self.path.startswith("/echo-bytes"):
+                    return self._send(201, body, self.headers.get("content-type", "application/octet-stream"))
+                return self._send(200, self._info(body))
+
+            do_PUT = do_POST  # noqa: N815
+            do_PATCH = do_POST  # noqa: N815
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                return self._send(204, b"")
+
+            def log_message(self, *a: Any) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", self.port), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
 # ----------------------------------------------------------------------------- dashboard socket
 class Dashboard:
     def __init__(self, ws_base: str, token: str) -> None:
@@ -166,6 +230,7 @@ async def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="bridgebot_e2e_"))
     procs: List[subprocess.Popen] = []
     rx = Receiver()
+    app = LocalApp()
     try:
         port = free_port()
         base = f"http://127.0.0.1:{port}"
@@ -173,7 +238,7 @@ async def main() -> int:
                "DATABASE_URL": os.getenv("E2E_DATABASE_URL", f"sqlite+aiosqlite:///{tmp/'e2e.db'}"),
                "OPENROUTER_API_KEY": "", "JWT_SECRET": "e2e-secret-" + uuid.uuid4().hex,
                "ADMIN_EMAIL": ADMIN_EMAIL, "ADMIN_PASSWORD": "", "ENVIRONMENT": "development",
-               "WEBHOOK_ALLOW_PRIVATE": "true", "WEBHOOK_RETRY_BASE_S": "1"}
+               "WEBHOOK_ALLOW_PRIVATE": "true", "WEBHOOK_RETRY_BASE_S": "1", "TUNNEL_TIMEOUT_S": "2"}
         step(f"starting backend on {base}")
         procs.append(subprocess.Popen([PY, "-m", "uvicorn", "server:app", "--port", str(port), "--log-level", "warning"],
                                       cwd=ROOT / "backend", env=env, stdout=open(tmp / "backend.log", "w"), stderr=subprocess.STDOUT))
@@ -181,7 +246,7 @@ async def main() -> int:
         conn_proc: Optional[subprocess.Popen] = None
 
         async with httpx.AsyncClient(base_url=base, timeout=30) as http:
-            for _ in range(150):
+            for _ in range(600):
                 try:
                     if (await http.get("/healthz")).status_code == 200:
                         break
@@ -281,6 +346,66 @@ async def main() -> int:
             res3 = await dash.wait_for(lambda e: e["type"] == "TASK_RESULT" and e.get("task_id") == r.json()["task_id"])
             check(res3["exit_code"] == -1 and "not in allowed_commands" in res3["error"], "non-allowlisted command blocked by daemon")
 
+            step("HTTP tunnel: /t/{slug}/… → connector → real local http.server")
+            r = await http.post("/api/tunnels", headers=H, json={"connector_id": cid, "local_port": app.port, "name": "local app", "slug": "e2e-app-" + uuid.uuid4().hex[:6]})
+            check(r.status_code == 201 and r.json()["access_token"] is None, "tunnel created (unprotected)")
+            tun = r.json()["tunnel"]
+            check(tun["public_url"].endswith(f"/t/{tun['slug']}/") and tun["online"], f"public URL {tun['public_url']} · machine online")
+            check((await http.post("/api/tunnels", headers=H, json={"connector_id": cid, "local_port": 9})).status_code == 402, "tunnel #2 blocked on FREE (402)")
+            T = f"/t/{tun['slug']}"
+            r = await http.get(f"{T}/hello/w%C3%B6rld%20x?x=1&y=two%20words", headers={"X-Custom": "abc", "Accept": "application/json"})
+            info = r.json()
+            check(r.status_code == 200 and info["method"] == "GET" and info["path"] == "/hello/w%C3%B6rld%20x?x=1&y=two%20words", f"GET path+query forwarded verbatim ({info['path']})")
+            check(info["headers"]["x-custom"] == "abc" and info["headers"]["host"] == f"localhost:{app.port}" and info["headers"]["x-forwarded-prefix"] == T, "request headers + X-Forwarded-* forwarded, Host rewritten")
+            check(r.headers.get("x-bridgebot-tunnel") == tun["slug"], "response tagged X-BridgeBot-Tunnel")
+            r = await http.post(f"{T}/api/items", json={"name": "widget", "qty": 3})
+            check(r.status_code == 200 and r.json()["method"] == "POST" and json.loads(r.json()["body"]) == {"name": "widget", "qty": 3}, "POST JSON body forwarded")
+            blob = os.urandom(300_000) + bytes(range(256))
+            r = await http.post(f"{T}/echo-bytes", content=blob, headers={"Content-Type": "application/octet-stream"})
+            check(r.status_code == 201 and r.content == blob, f"binary POST round-trip byte-exact ({len(blob)} bytes)")
+            r = await http.get(f"{T}/binary")
+            check(r.status_code == 200 and r.content == BINARY and r.headers["content-type"] == "application/octet-stream", "binary GET 1 MiB byte-exact")
+            r = await http.put(f"{T}/thing/1", content=b"put-body")
+            check(r.json()["method"] == "PUT" and r.json()["body"] == "put-body", "PUT forwarded")
+            check((await http.delete(f"{T}/thing/1")).status_code == 204, "DELETE → 204")
+            r = await http.head(f"{T}/hello")
+            check(r.status_code == 200 and r.content == b"", "HEAD → 200, no body")
+            r = await http.get(f"{T}/redirect", follow_redirects=False)
+            check(r.status_code == 302 and r.headers["location"] == f"{T}/hello?from=redirect", "redirect Location rewritten into the tunnel")
+            r = await http.get(f"{T}/cookies")
+            check(r.headers.get_list("set-cookie") == ["a=1; Path=/", "b=2; Path=/"] and r.headers["x-local-app"] == "yes", "multiple Set-Cookie + custom response headers preserved")
+            r = await http.get(f"/t/{tun['slug']}", follow_redirects=False)
+            check(r.status_code == 307 and r.headers["location"] == f"/t/{tun['slug']}/", "bare /t/{slug} → 307 to trailing slash")
+            t0 = time.monotonic()
+            r = await http.get(f"{T}/slow")
+            check(r.status_code == 504 and "Tunnel timeout" in r.text, f"slow local service → 504 page after {time.monotonic() - t0:.1f}s (got {r.status_code})")
+            r = await http.get("/t/does-not-exist/x")
+            check(r.status_code == 404 and "Tunnel not found" in r.text, "unknown slug → 404 page")
+            r = await http.post(f"{T}/echo-bytes", content=b"x" * (8 * 1024 * 1024 + 1))
+            check(r.status_code == 413, "request > 8 MB → 413")
+
+            step("HTTP tunnel: access token, pause, wrong port")
+            r = await http.patch(f"/api/tunnels/{tun['id']}", headers=H, json={"require_token": True})
+            ttok = r.json()["access_token"]
+            check(ttok and ttok.startswith("tnl_") and r.json()["tunnel"]["protected"], "access token enabled (tnl_…)")
+            r = await http.get(f"{T}/hello")
+            check(r.status_code == 401 and "Access token required" in r.text, "no token → 401 page")
+            check((await http.get(f"{T}/hello", headers={"X-Tunnel-Token": "tnl_wrong"})).status_code == 401, "wrong token → 401")
+            r = await http.get(f"{T}/hello", headers={"X-Tunnel-Token": ttok})
+            check(r.status_code == 200 and "x-tunnel-token" not in r.json()["headers"], "X-Tunnel-Token works and is not forwarded")
+            r = await http.get(f"{T}/hello?a=1&tunnel_token={ttok}")
+            check(r.status_code == 200 and r.json()["path"] == "/hello?a=1", "?tunnel_token= works and is stripped from the query")
+            await http.patch(f"/api/tunnels/{tun['id']}", headers=H, json={"is_active": False})
+            check((await http.get(f"{T}/hello", headers={"X-Tunnel-Token": ttok})).status_code == 503, "paused tunnel → 503")
+            await http.patch(f"/api/tunnels/{tun['id']}", headers=H, json={"is_active": True, "require_token": False, "local_port": free_port()})
+            r = await http.get(f"{T}/hello")
+            check(r.status_code == 502 and "nothing is listening" in r.text, "closed local port → 502 page")
+            await http.patch(f"/api/tunnels/{tun['id']}", headers=H, json={"local_port": app.port})
+            lst = (await http.get("/api/tunnels", headers=H)).json()
+            check(lst[0]["requests_count"] >= 10 and lst[0]["bytes_out"] > 1_000_000 and lst[0]["machine_name"] == "e2e-pc", f"usage stats: {lst[0]['requests_count']} requests, {lst[0]['bytes_out']} bytes out")
+            o_conn = await http.post("/api/connectors", headers={"Authorization": f"Bearer {token}"}, json={"machine_name": "x"})
+            check(o_conn.status_code == 402, "(machine limit still enforced)")
+
             step("inbound webhook blocked on FREE")
             inbound = (await http.get("/api/webhooks/inbound", headers=H)).json()
             r = await http.post(inbound["path"], json={"command": "echo from-zapier"})
@@ -342,7 +467,7 @@ async def main() -> int:
                 "niche_requirements_text": "Real estate agency in Riyadh selling villas; qualify buyers and book viewings.",
                 "business_name": "Riyadh Homes", "goals": ["qualify buyers"], "target_connector_id": cid, "target_agent_name": "default"})
             trid = r.json()["id"]
-            for _ in range(150):
+            for _ in range(600):
                 tr = (await http.get(f"/api/training/{trid}", headers=H)).json()
                 if tr["status"] in ("READY", "FAILED"):
                     break
@@ -578,6 +703,8 @@ async def main() -> int:
             print("  ✔ connector.offline webhook")
             r = await http.post("/api/trigger-task", json={"connector_id": cid, "command": "echo hi"}, headers=H)
             check(r.status_code == 409, "task to offline connector → 409")
+            r = await http.get(f"{T}/hello")
+            check(r.status_code == 502 and "Tunnel offline" in r.text and "e2e-pc" in r.text, "tunnel with machine offline → 502 'Tunnel offline' page")
             await dash.close()
 
         print("\n✅ ALL E2E CHECKS PASSED")
@@ -590,6 +717,7 @@ async def main() -> int:
         raise
     finally:
         rx.server.shutdown()
+        app.server.shutdown()
         for p in procs:
             if p.poll() is None:
                 p.terminate()

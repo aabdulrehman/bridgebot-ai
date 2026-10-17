@@ -15,7 +15,7 @@ import logging
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Set
+from typing import Any, Dict, Set, Tuple
 
 from fastapi import WebSocket
 
@@ -30,6 +30,7 @@ class ConnectorSession:
     user_id: uuid.UUID
     websocket: WebSocket
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    features: Set[str] = field(default_factory=set)       # advertised in HELLO (e.g. "tunnel")
 
 
 class ConnectionHub:
@@ -41,6 +42,8 @@ class ConnectionHub:
         self._lock = asyncio.Lock()
         # Bot API: bot_id -> live /ws/bot socket, and wake-up events for long polling.
         self.bots: Dict[uuid.UUID, WebSocket] = {}
+        # HTTP tunnels: request_id -> (connector_id, future resolved by TUNNEL_RESPONSE)
+        self.tunnel_waiters: Dict[str, Tuple[uuid.UUID, "asyncio.Future[Dict[str, Any]]"]] = {}
         self.bot_events: Dict[uuid.UUID, asyncio.Event] = defaultdict(asyncio.Event)
 
     # ------------------------------------------------------------------ connectors
@@ -63,6 +66,19 @@ class ConnectionHub:
                 del self.connectors[connector_id]
                 return True
         return False
+
+    def resolve_tunnel(self, connector_id: uuid.UUID, msg: Dict[str, Any]) -> bool:
+        """Deliver a TUNNEL_RESPONSE to the waiting HTTP request (only from the connector it was sent to)."""
+        entry = self.tunnel_waiters.get(str(msg.get("request_id")))
+        if entry is None or entry[0] != connector_id or entry[1].done():
+            return False
+        entry[1].set_result(msg)
+        return True
+
+    def fail_tunnels(self, connector_id: uuid.UUID) -> None:
+        for _rid, (cid, fut) in list(self.tunnel_waiters.items()):
+            if cid == connector_id and not fut.done():
+                fut.set_exception(ConnectionError("connector disconnected"))
 
     def is_online(self, connector_id: uuid.UUID) -> bool:
         return connector_id in self.connectors

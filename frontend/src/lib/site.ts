@@ -38,12 +38,12 @@ export function limit(n: number, unit = ""): string {
 
 /** Mirrors backend/app/billing/plans.py — the API is the source of truth. */
 export const FALLBACK_PLANS: Plan[] = [
-  { id: "FREE", name: "Free", price_monthly_cents: 0, currency: "USD", monthly_tokens: 5000, max_machines: 1, max_tasks_per_day: 50, max_webhooks: 1, max_api_keys: 1, max_bots: 1, training_access: true, inbound_webhooks: false, sort_order: 0,
-    features_json: ["Cloud-to-Local Bridge: 1 machine", "Live stdout/stderr log streaming", "50 remote tasks / day", "On-Demand Training: 5,000 platform tokens / month (~5 skills)", "1 outbound webhook", "1 personal API key", "Community support"] },
-  { id: "PRO", name: "Pro", price_monthly_cents: 1900, currency: "USD", monthly_tokens: 100000, max_machines: 5, max_tasks_per_day: 1000, max_webhooks: 10, max_api_keys: 5, max_bots: 10, training_access: true, inbound_webhooks: true, sort_order: 1,
-    features_json: ["Cloud-to-Local Bridge: 5 machines", "Live log streaming + audit history", "1,000 remote tasks / day", "On-Demand Training: 100,000 platform tokens / month", "10 outbound webhooks (HMAC-signed, retries)", "Inbound webhook → trigger tasks from Zapier/n8n/Make", "5 personal API keys", "Email support"] },
-  { id: "BUSINESS", name: "Business", price_monthly_cents: 7900, currency: "USD", monthly_tokens: 500000, max_machines: 25, max_tasks_per_day: -1, max_webhooks: 50, max_api_keys: 20, max_bots: 50, training_access: true, inbound_webhooks: true, sort_order: 2,
-    features_json: ["Cloud-to-Local Bridge: 25 machines", "Unlimited remote tasks", "On-Demand Training: 500,000 platform tokens / month", "50 outbound webhooks + inbound webhook", "20 personal API keys", "Priority support & onboarding"] },
+  { id: "FREE", name: "Free", price_monthly_cents: 0, currency: "USD", monthly_tokens: 5000, max_machines: 1, max_tasks_per_day: 50, max_webhooks: 1, max_api_keys: 1, max_bots: 1, max_tunnels: 1, training_access: true, inbound_webhooks: false, sort_order: 0,
+    features_json: ["Cloud-to-Local Bridge: 1 machine", "Live stdout/stderr log streaming", "50 remote tasks / day", "On-Demand Training: 5,000 platform tokens / month (~5 skills)", "1 outbound webhook", "1 personal API key", "HTTP tunnel: 1 public URL to a local port", "Community support"] },
+  { id: "PRO", name: "Pro", price_monthly_cents: 1900, currency: "USD", monthly_tokens: 100000, max_machines: 5, max_tasks_per_day: 1000, max_webhooks: 10, max_api_keys: 5, max_bots: 10, max_tunnels: 5, training_access: true, inbound_webhooks: true, sort_order: 1,
+    features_json: ["Cloud-to-Local Bridge: 5 machines", "Live log streaming + audit history", "1,000 remote tasks / day", "On-Demand Training: 100,000 platform tokens / month", "10 outbound webhooks (HMAC-signed, retries)", "Inbound webhook → trigger tasks from Zapier/n8n/Make", "5 personal API keys", "HTTP tunnels: 5 public URLs (n8n webhooks, local APIs)", "Email support"] },
+  { id: "BUSINESS", name: "Business", price_monthly_cents: 7900, currency: "USD", monthly_tokens: 500000, max_machines: 25, max_tasks_per_day: -1, max_webhooks: 50, max_api_keys: 20, max_bots: 50, max_tunnels: 20, training_access: true, inbound_webhooks: true, sort_order: 2,
+    features_json: ["Cloud-to-Local Bridge: 25 machines", "Unlimited remote tasks", "On-Demand Training: 500,000 platform tokens / month", "50 outbound webhooks + inbound webhook", "20 personal API keys", "HTTP tunnels: 20 public URLs", "Priority support & onboarding"] },
 ];
 
 const ME_KEY = "bridgebot_me";
