@@ -308,10 +308,12 @@ async def main() -> int:
             step("bridge: start local_connector.py")
             try:
                 async with websockets.connect(f"{ws_base}/ws/connect", additional_headers={"Authorization": "Bearer bbk_wrong"}) as bad:
+                    bye = json.loads(await bad.recv())
+                    check(bye["type"] == "GOODBYE" and bye["code"] == 4401, f"bad key → GOODBYE 4401 ({bye.get('reason')})")
                     await bad.recv()
                 raise AssertionError("bad key accepted")
             except (websockets.InvalidStatus, websockets.ConnectionClosed):
-                print("  ✔ bad connector key refused")
+                print("  ✔ bad connector key refused (socket closed)")
             skills_dir = tmp / "skills"
             cenv = {**os.environ, "BRIDGEBOT_API_KEY": conn_key, "BRIDGEBOT_SERVER_URL": base,
                     "BRIDGEBOT_MACHINE_NAME": "e2e-pc", "BRIDGEBOT_SKILLS_DIR": str(skills_dir), "BRIDGEBOT_AUTH_RETRY_S": "1"}

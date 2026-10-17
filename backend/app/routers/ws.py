@@ -30,7 +30,7 @@ from .. import botnet, webhooks
 from ..audit import write_audit
 from ..config import get_settings
 from ..database import SessionLocal
-from ..hub import ConnectorSession, hub
+from ..hub import ConnectorSession, hub, kick
 from ..models import Agent, Connector, User
 from ..security import decode_access_token, hash_api_key
 
@@ -133,7 +133,7 @@ async def connector_ws(ws: WebSocket) -> None:
         else:
             code, reason = 4403, f"Account {owner.status.lower()}"
         await ws.accept()
-        await ws.close(code=code, reason=reason)
+        await kick(ws, code, reason)
         return
 
     await ws.accept()
@@ -160,7 +160,7 @@ async def connector_ws(ws: WebSocket) -> None:
                 text = await asyncio.wait_for(ws.receive_text(), timeout=settings.heartbeat_timeout_s)
             except asyncio.TimeoutError:
                 log.warning("connector %s heartbeat timeout", connector_id)
-                await ws.close(code=4008, reason="Heartbeat timeout")
+                await kick(ws, 4008, "Heartbeat timeout")
                 break
             try:
                 msg: Dict[str, Any] = json.loads(text)

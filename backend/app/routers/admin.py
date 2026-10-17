@@ -13,7 +13,7 @@ from ..audit import write_audit
 from ..billing.service import apply_plan, approve_upgrade, record_payment, usage
 from ..database import get_db
 from ..deps import require_admin
-from ..hub import hub
+from ..hub import hub, kick
 from ..models import AuditLog, Connector, Payment, Plan, TrainingRequest, UpgradeRequest, User, WebhookDelivery
 from ..schemas import AdminDecisionIn, AdminUserPatch, AuditOut, UpgradeRequestOut, UserOut
 
@@ -128,7 +128,7 @@ async def patch_user(user_id: uuid.UUID, body: AdminUserPatch, admin: User = Dep
     await db.commit()
     if u.status != "ACTIVE":  # kick live sessions
         for s in [s for s in hub.connectors.values() if s.user_id == u.id]:
-            await s.websocket.close(code=4003, reason=f"Account {u.status.lower()}")
+            await kick(s.websocket, 4003, f"Account {u.status.lower()}")
         for ws in list(hub.dashboards.get(u.id, ())):
             await ws.close(code=4003)
     await write_audit(None, "ADMIN_USER_UPDATE", {"admin": admin.email, "user": u.email, "changes": changes, "note": body.note})

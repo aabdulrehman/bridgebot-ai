@@ -33,6 +33,19 @@ class ConnectorSession:
     features: Set[str] = field(default_factory=set)       # advertised in HELLO (e.g. "tunnel")
 
 
+async def kick(ws: WebSocket, code: int, reason: str) -> None:
+    """Close a connector socket *and* tell it why first: some proxies (incl. Render's edge) drop server close
+    frames, so the GOODBYE message is what lets the connector pick the right retry policy."""
+    try:
+        await ws.send_json({"type": "GOODBYE", "code": code, "reason": reason})
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await ws.close(code=code, reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class ConnectionHub:
     """Tracks live sockets and routes messages between them."""
 
@@ -55,10 +68,7 @@ class ConnectionHub:
             self.connectors[session.connector_id] = session
         if old is not None and old.websocket is not session.websocket:
             # Only one live session per connector: kick the stale one.
-            try:
-                await old.websocket.close(code=4000, reason="Replaced by a newer session")
-            except Exception:  # noqa: BLE001
-                pass
+            await kick(old.websocket, 4000, "Replaced by a newer session")
 
     async def unregister_connector(self, connector_id: uuid.UUID, websocket: WebSocket) -> bool:
         """Remove a session if it is still the current one. Returns True if removed."""

@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from ..billing.service import enforce_machine_limit
 from ..database import get_db
 from ..deps import get_current_user
-from ..hub import hub
+from ..hub import hub, kick
 from ..models import AuditLog, Connector, User
 from ..schemas import AuditOut, ConnectorCreatedOut, ConnectorCreateIn, ConnectorOut
 from ..security import generate_api_key, hash_api_key
@@ -68,7 +68,7 @@ async def rotate_key(connector_id: uuid.UUID, user: User = Depends(get_current_u
     await db.commit()
     session = hub.connectors.get(conn.id)
     if session:
-        await session.websocket.close(code=4001, reason="API key rotated")
+        await kick(session.websocket, 4001, "API key rotated")
     return ConnectorCreatedOut(**ConnectorOut.model_validate(conn).model_dump(), api_key=raw_key)
 
 
@@ -78,7 +78,7 @@ async def delete_connector(connector_id: uuid.UUID, user: User = Depends(get_cur
     conn = await get_owned_connector(db, user, connector_id)
     session = hub.connectors.get(conn.id)
     if session:
-        await session.websocket.close(code=4002, reason="Connector deleted")
+        await kick(session.websocket, 4002, "Connector deleted")
     await db.delete(conn)
     await db.commit()
 

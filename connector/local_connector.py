@@ -284,6 +284,7 @@ class LocalConnector:
         while not self._stop.is_set():
             kind, detail = "network", ""
             self._welcomed = False
+            self._goodbye = None
             try:
                 log.info("connecting to %s ...", url)
                 async with ws_connect(url, **{_HEADER_KW: headers}, ping_interval=self.cfg.ws_ping_interval_s,
@@ -300,11 +301,12 @@ class LocalConnector:
                     finally:
                         heartbeat.cancel()
                         self.ws = None
-                    kind, detail = _classify_close(ws.close_code, ws.close_reason or "")
+                    code, reason = self._goodbye or (ws.close_code, ws.close_reason or "")
+                    kind, detail = _classify_close(code, reason)
                     if self._welcomed:
                         attempt = 0
                         auth_failures = 0
-                    log.warning("connection closed (code=%s reason=%s)", ws.close_code, ws.close_reason or "-")
+                    log.warning("connection closed (code=%s reason=%s)", code, reason or "-")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — network errors, DNS, TLS, HTTP 403 from old servers, ...
@@ -413,6 +415,10 @@ class LocalConnector:
             self._spawn(self._handle_skill(msg))
         elif mtype == "TUNNEL_REQUEST":
             self._spawn(self._handle_tunnel(msg))
+        elif mtype == "GOODBYE":   # the cloud is closing us on purpose; remember why (close frames can get lost)
+            self._goodbye = (int(msg.get("code") or 0), str(msg.get("reason") or ""))
+            if self.ws is not None:
+                await self.ws.close()
         elif mtype == "ERROR":
             log.error("cloud error: %s", msg.get("error"))
         else:
