@@ -14,6 +14,7 @@ const NAV = [
   { href: "/marketplace/", label: "Marketplace", short: "Market", icon: "🏪" },
   { href: "/train/", label: "Train My Bot", short: "Train", icon: "🧠" },
   { href: "/remote/", label: "Remote Desktop", short: "Remote", icon: "🖥️" },
+  { href: "/mobile/", label: "Live Mobilelty", short: "Phone", icon: "📱" },
   { href: "/tunnels/", label: "Tunnels", short: "Tunnels", icon: "🌐" },
   { href: "/webhooks/", label: "Webhooks", short: "Hooks", icon: "🔔" },
   { href: "/api-keys/", label: "API Keys", short: "Keys", icon: "🔑" },

@@ -8,6 +8,7 @@ import MarketingLayout from "./MarketingLayout";
 const PAGES = [
   { href: "/docs/", label: "Getting started" },
   { href: "/docs/connect/", label: "Connect your machine" },
+  { href: "/docs/mobile/", label: "Live Mobilelty (Android)" },
   { href: "/docs/bots/", label: "Bot API & adapters" },
   { href: "/docs/marketplace/", label: "Marketplace & Master Bots" },
   { href: "/docs/api/", label: "API reference" },

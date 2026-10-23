@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@color/bg" android:fillViewport="true">
+    <LinearLayout
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="20dp">
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="📱 Live Mobilelty" android:textSize="24sp" android:textStyle="bold"
+            android:textColor="@color/text" android:layout_marginBottom="4dp"/>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Control this Android phone from your laptop browser. Owner-only."
+            android:textColor="@color/muted" android:textSize="13sp" android:layout_marginBottom="16dp"/>
+
+        <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Offline" android:textColor="@color/accent" android:textStyle="bold"
+            android:background="@color/card" android:padding="12dp" android:layout_marginBottom="12dp"/>
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Hub URL" android:textColor="@color/muted" android:textSize="12sp"/>
+        <EditText android:id="@+id/hub" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="https://bridgebot-ai.onrender.com" android:inputType="textUri"
+            android:textColor="@color/text" android:textColorHint="@color/muted"
+            android:background="@color/card" android:padding="12dp" android:layout_marginBottom="10dp"/>
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="6-digit pair code (from the website)" android:textColor="@color/muted" android:textSize="12sp"/>
+        <EditText android:id="@+id/code" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="123456" android:inputType="number" android:maxLength="6"
+            android:textColor="@color/text" android:textColorHint="@color/muted"
+            android:background="@color/card" android:padding="12dp" android:layout_marginBottom="10dp"/>
+
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="Or paste your bbk_… key" android:textColor="@color/muted" android:textSize="12sp"/>
+        <EditText android:id="@+id/key" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:hint="bbk_…" android:inputType="textPassword"
+            android:textColor="@color/text" android:textColorHint="@color/muted"
+            android:background="@color/card" android:padding="12dp" android:layout_marginBottom="14dp"/>
+
+        <Button android:id="@+id/btnPair" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Pair with code" android:layout_marginBottom="8dp"/>
+        <Button android:id="@+id/btnStart" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Start / reconnect" android:layout_marginBottom="8dp"/>
+        <Button android:id="@+id/btnStop" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Stop" style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_marginBottom="16dp"/>
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Setup checklist"
+            android:textColor="@color/text" android:textStyle="bold" android:layout_marginBottom="8dp"/>
+        <Button android:id="@+id/btnCapture" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="1. Allow screen capture" style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_marginBottom="6dp"/>
+        <Button android:id="@+id/btnA11y" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="2. Enable Accessibility service" style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_marginBottom="6dp"/>
+        <Button android:id="@+id/btnBattery" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="3. Disable battery optimisation" style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_marginBottom="12dp"/>
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="A persistent notification stays on while connected. Only the BridgeBot account that owns this phone can see or control it."
+            android:textColor="@color/muted" android:textSize="12sp"/>
+    </LinearLayout>
+</ScrollView>

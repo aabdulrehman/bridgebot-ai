@@ -191,6 +191,7 @@ class ConnectorOut(BaseModel):
     last_heartbeat: Optional[datetime]
     created_at: datetime
     agents: List[AgentOut] = []
+    features: List[str] = []   # live, from the connector's HELLO (e.g. "android", "remote_desktop")
 
 
 class ConnectorCreatedOut(ConnectorOut):

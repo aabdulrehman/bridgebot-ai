@@ -15,6 +15,7 @@ export interface Connector {
   last_heartbeat: string | null;
   created_at: string;
   agents: Agent[];
+  features?: string[];
   api_key?: string;
 }
 

@@ -4,6 +4,8 @@
 
 **Live:** https://bridgebot-ai.onrender.com (Render free, auto-deploys from `main`).
 
+**Live Mobilelty (Android).** Control your phone from a laptop browser — live screen, tap, swipe, type, Back/Home/Recents. Open-source Kotlin app in `android/live-mobilelty`, APK via GitHub Actions → `/downloads/live-mobilelty.apk`. Dashboard: `/mobile/`.
+
 **Universal Bot Bridge.** Any bot — Hermes Agent, OpenClaw, n8n, LangChain, any HTTP/CLI bot, or an external cloud bot such as Grok Bot — links via the local connector *or* the generic **Bot API** (bot token → long-poll / WebSocket / webhook → reply over REST). A one-file Python SDK doubles as a no-code adapter.
 
 **Master Bot Marketplace.** The owner (admin) publishes Master Bots (skill payload + persona + tools + follow-up test). Subscribers add their bot to a master's messenger group or click **“Make my bot a master”**; the master then welcomes it, injects the skill (`SKILL_INJECT` for connector bots, Bot-API/webhook update for external bots), runs a follow-up test and certifies it — fully automatic, gated by plan.

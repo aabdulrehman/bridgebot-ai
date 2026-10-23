@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Live Mobilelty</string>
+    <string name="notif_channel">Live Mobilelty</string>
+    <string name="notif_title">Live Mobilelty connected</string>
+    <string name="notif_body">Your phone can be controlled from your BridgeBot account. Tap Stop to disconnect.</string>
+    <string name="notif_session">Someone from YOUR account is viewing this phone.</string>
+    <string name="accessibility_desc">Lets Live Mobilelty tap, swipe, type and press Back / Home / Recents when YOU control the phone from your laptop. Only your BridgeBot account can send gestures.</string>
+</resources>

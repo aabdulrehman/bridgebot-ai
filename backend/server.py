@@ -24,7 +24,7 @@ from app.database import SessionLocal, init_db
 from app.hub import hub
 from app.models import Connector
 from app import webhooks
-from app.routers import admin, apikeys, auth, billing, bots, connectors, hooks, marketplace, public, tasks, training, tunnels, webhooks_api, ws
+from app.routers import admin, apikeys, auth, billing, bots, connectors, hooks, marketplace, mobile, public, tasks, training, tunnels, webhooks_api, ws
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridgebot")
@@ -118,6 +118,7 @@ app.include_router(ws.router)
 app.include_router(bots.router)
 app.include_router(tunnels.router)
 app.include_router(marketplace.router)
+app.include_router(mobile.router)
 
 
 # -----------------------------------------------------------------------------

@@ -1,0 +1,102 @@
+name: Build Live Mobilelty APK
+
+on:
+  push:
+    paths:
+      - "android/live-mobilelty/**"
+      - ".github/workflows/android-apk.yml"
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: android/live-mobilelty
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate Gradle wrapper
+        run: |
+          gradle wrapper --gradle-version 8.7 || true
+          if [ ! -f gradlew ]; then
+            curl -fsSLO https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradlew
+            curl -fsSLO https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar
+            mkdir -p gradle/wrapper
+            mv gradle-wrapper.jar gradle/wrapper/ 2>/dev/null || true
+            chmod +x gradlew
+            # Prefer the gradle installed on the runner to bootstrap the wrapper
+            (command -v gradle >/dev/null && gradle wrapper --gradle-version 8.7) || true
+          fi
+          chmod +x gradlew || true
+
+      - name: Create debug keystore for unsigned-friendly release
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p keystore
+          if [ -n "$ANDROID_KEYSTORE_PASSWORD" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > keystore/release.jks
+            echo "ANDROID_KEYSTORE_PATH=$PWD/keystore/release.jks" >> $GITHUB_ENV
+            echo "ANDROID_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "ANDROID_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "ANDROID_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            # Free fallback: sign with a repo-generated keystore so the APK installs without Play Store
+            keytool -genkeypair -v -keystore keystore/release.jks -storepass android -keypass android \
+              -alias livemobilelty -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Live Mobilelty, OU=BridgeBot, O=BridgeBot AI, L=Riyadh, ST=Riyadh, C=SA"
+            echo "ANDROID_KEYSTORE_PATH=$PWD/keystore/release.jks" >> $GITHUB_ENV
+            echo "ANDROID_KEYSTORE_PASSWORD=android" >> $GITHUB_ENV
+            echo "ANDROID_KEY_ALIAS=livemobilelty" >> $GITHUB_ENV
+            echo "ANDROID_KEY_PASSWORD=android" >> $GITHUB_ENV
+          fi
+
+      - name: Install Gradle
+        run: |
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.7-bin.zip -o /tmp/gradle.zip
+          sudo unzip -qo /tmp/gradle.zip -d /opt
+          echo /opt/gradle-8.7/bin >> $GITHUB_PATH
+
+      - name: Gradle wrapper + assembleRelease
+        run: |
+          gradle wrapper --gradle-version 8.7
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
+          mkdir -p dist
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          cp "$APK" dist/live-mobilelty.apk
+          ls -lh dist/live-mobilelty.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-mobilelty-apk
+          path: android/live-mobilelty/dist/live-mobilelty.apk
+
+      - name: Publish / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: live-mobilelty-v1
+          name: Live Mobilelty Android v1
+          body: |
+            Signed release APK for **Live Mobilelty** (control your Android phone from a laptop browser).
+            1. Download `live-mobilelty.apk`
+            2. On the phone: allow install from unknown sources
+            3. Open https://bridgebot-ai.onrender.com/mobile/ → Get pair code
+            4. Enter the code in the app → allow screen capture + Accessibility
+          files: android/live-mobilelty/dist/live-mobilelty.apk
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

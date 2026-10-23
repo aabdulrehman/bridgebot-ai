@@ -56,6 +56,8 @@ async def list_connectors(user: User = Depends(get_current_user), db: AsyncSessi
     result = list(rows)
     for c in result:  # the in-memory pool is the source of truth for liveness
         c.status = "ONLINE" if hub.is_online(c.id) else "OFFLINE"
+        sess = hub.connectors.get(c.id)
+        c.features = sorted(sess.features) if sess else []
     return result
 
 
