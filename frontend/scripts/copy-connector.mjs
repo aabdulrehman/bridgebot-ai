@@ -14,3 +14,16 @@ if (!src) {
 mkdirSync(out, { recursive: true });
 for (const f of ["local_connector.py", "connector_config.example.json", "requirements.txt", "bridgebot_sdk.py", "install.sh", "install.ps1"]) copyFileSync(join(src, f), join(out, f));
 console.log(`[copy-connector] copied connector files from ${src}`);
+const apkCandidates = [
+  join(here, "..", "..", "android", "live-mobilelty", "dist", "live-mobilelty.apk"),
+  "/android/live-mobilelty/dist/live-mobilelty.apk",
+  join(here, "..", "public", "downloads", "live-mobilelty.apk"),
+];
+const apk = apkCandidates.find((f) => existsSync(f));
+if (apk) {
+  copyFileSync(apk, join(out, "live-mobilelty.apk"));
+  console.log(`[copy-connector] copied Live Mobilelty APK from ${apk}`);
+} else {
+  console.warn("[copy-connector] live-mobilelty.apk not found — phone install link will redirect to GitHub release");
+}
+

@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..billing.service import enforce_machine_limit
-from ..config import settings
+from ..config import get_settings
 from ..database import get_db
 from ..deps import get_current_user
 from ..hub import hub, kick
@@ -48,7 +48,7 @@ def _gc() -> None:
 
 
 def _apk_path() -> Path | None:
-    fe = Path(settings.frontend_dir).expanduser()
+    fe = Path(get_settings().frontend_dir).expanduser()
     if not fe.is_absolute():
         fe = (Path(__file__).resolve().parents[2] / fe).resolve()
     for candidate in (fe / "downloads" / "live-mobilelty.apk",

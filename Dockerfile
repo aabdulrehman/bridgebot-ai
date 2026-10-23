@@ -10,8 +10,9 @@ WORKDIR /fe
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
-# prebuild copies the connector into public/downloads (served at /downloads/…)
+# prebuild copies the connector + Live Mobilelty APK into public/downloads
 COPY connector/ /connector/
+COPY android/live-mobilelty/dist/ /android/live-mobilelty/dist/
 # Empty => the PWA talks to the origin that serves it (this container).
 ENV NEXT_PUBLIC_API_URL="" NEXT_TELEMETRY_DISABLED=1
 RUN rm -f .env.local && npm run build

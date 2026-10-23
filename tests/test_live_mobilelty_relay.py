@@ -102,8 +102,10 @@ async def main() -> None:
 
     async with httpx.AsyncClient(base_url=BASE, timeout=30, follow_redirects=False) as c:
         r = await c.get("/downloads/live-mobilelty.apk")
-        assert r.status_code in (302, 307), r.status_code
-        assert "live-mobilelty.apk" in r.headers.get("location", ""), r.headers.get("location")
+        if r.status_code in (302, 307):
+            assert "live-mobilelty.apk" in r.headers.get("location", ""), r.headers.get("location")
+        else:
+            assert r.status_code == 200 and r.content[:2] == b"PK", (r.status_code, r.content[:8])
 
     print("PASS: Live Mobilelty relay + pairing + owner-only + APK redirect")
 
