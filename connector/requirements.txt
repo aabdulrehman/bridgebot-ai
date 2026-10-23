@@ -1,4 +1,7 @@
 websockets>=12
-# optional, for --remote-desktop (Linux X11 also needs: sudo apt install xdotool xclip)
+# Remote desktop
 mss>=9
 pillow>=10
+pyperclip>=1.8
+# Mouse/keyboard control — required on Windows/Mac; on Linux we prefer xdotool (pynput needs build tools)
+pynput>=1.7; sys_platform == "win32" or sys_platform == "darwin"

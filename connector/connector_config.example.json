@@ -3,12 +3,33 @@
   "api_key": "bbk_paste_the_key_shown_once_in_the_dashboard",
   "machine_name": "home-pc",
   "heartbeat_interval_s": 20,
-  "allowed_commands": ["echo", "ls", "dir", "pwd", "whoami", "hostname", "uname", "date", "nvidia-smi", "ollama", "n8n", "git", "docker"],
+  "allowed_commands": [
+    "echo",
+    "ls",
+    "dir",
+    "pwd",
+    "whoami",
+    "hostname",
+    "uname",
+    "date",
+    "nvidia-smi",
+    "ollama",
+    "n8n",
+    "git",
+    "docker"
+  ],
   "allow_any_command": false,
   "skills_dir": "./skills",
   "skill_hook_url": null,
   "agents": [
-    {"name": "default", "type": "generic"},
-    {"name": "n8n-main", "type": "n8n"}
-  ]
+    {
+      "name": "default",
+      "type": "generic"
+    },
+    {
+      "name": "n8n-main",
+      "type": "n8n"
+    }
+  ],
+  "remote_desktop": true
 }

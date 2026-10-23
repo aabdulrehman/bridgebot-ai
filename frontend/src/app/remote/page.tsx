@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Shell from "@/components/Shell";
 import { api, getToken, wsBase } from "@/lib/api";
+import { useApiBase } from "@/lib/useBase";
 import type { Connector } from "@/lib/types";
 
 type FileItem = { name: string; dir: boolean; size: number; mtime: number };
@@ -16,6 +17,7 @@ const KEYS = [["Esc", "Escape"], ["Tab", "Tab"], ["⌫", "BackSpace"], ["⏎", "
 const fmt = (n: number) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 export default function RemotePage() {
+  const base = useApiBase();
   const [machines, setMachines] = useState<Connector[]>([]);
   const [cid, setCid] = useState("");
   const [running, setRunning] = useState(false);
@@ -201,7 +203,14 @@ export default function RemotePage() {
             })}
           </ul>
         </div>
-        <p className="text-xs text-slate-500">Only you (the machine owner) can open this. Machine must run the connector with <code>--remote-desktop</code> on an X11 session. Emergency off on the laptop: <code>touch ~/.bridgebot/remote_desktop_off</code>.</p>
+        <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3 text-xs text-slate-300 space-y-2">
+          <p className="font-semibold text-slate-200">Install one-liners (copy-paste on the customer&apos;s PC)</p>
+          <p>First add a machine in the dashboard and copy the <code>bbk_…</code> key. Then:</p>
+          <p><b>Windows PowerShell:</b> <code className="break-all">irm {base}/downloads/install.ps1 | iex</code></p>
+          <p><b>Mac Terminal:</b> <code className="break-all">curl -fsSL {base}/downloads/install.sh | bash</code></p>
+          <p><b>Linux / Kali:</b> <code className="break-all">curl -fsSL {base}/downloads/install.sh | bash</code></p>
+          <p className="text-slate-500">macOS: after install, enable Screen Recording + Accessibility for Terminal/Python. Kill switch: <code>touch ~/.bridgebot/remote_desktop_off</code>. Full guide: <a className="underline" href="/docs/connect/">Connect docs</a>.</p>
+        </div>
       </div>
     </Shell>
   );

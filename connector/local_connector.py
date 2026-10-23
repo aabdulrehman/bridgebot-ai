@@ -60,7 +60,7 @@ except ImportError:  # pragma: no cover — legacy websockets < 13
 
     _HEADER_KW = "extra_headers"
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 IS_WINDOWS = os.name == "nt"
 log = logging.getLogger("bridgebot.connector")
 
@@ -730,41 +730,64 @@ def _post_json(url: str, data: Dict[str, Any]) -> int:
 
 
 # =============================================================================
-# Remote desktop (opt-in with --remote-desktop). Only the machine owner's dashboard can reach this:
-# the cloud forwards RD_* messages solely from dashboards logged in as the connector's owner.
-# Kill switch: `touch ~/.bridgebot/remote_desktop_off` (checked on every message) or stop the service.
+# Remote desktop (opt-in with --remote-desktop). Only the machine owner's dashboard
+# can reach this. Kill switch file: ~/.bridgebot/remote_desktop_off (any OS).
+# Capture: mss. Input: xdotool on Linux (pynput fallback), pynput on Win/Mac.
+# Clipboard: pyperclip (xclip fallback on Linux). Apps + open: per-OS.
 # =============================================================================
 RD_KILL_FILE = Path.home() / ".bridgebot" / "remote_desktop_off"
-RD_APPS = {
-    "chrome": [["google-chrome"], ["chromium"], ["chromium-browser"]],
-    "firefox": [["firefox-esr"], ["firefox"]],
-    "files": [["thunar"], ["nautilus"], ["pcmanfm"], ["dolphin"], ["xdg-open", str(Path.home())]],
-    "terminal": [["qterminal"], ["xfce4-terminal"], ["gnome-terminal"], ["konsole"], ["x-terminal-emulator"], ["xterm"]],
-    "editor": [["mousepad"], ["gedit"], ["kate"], ["code"]],
-}
 RD_MAX_FILE = 12 * 1024 * 1024
+_SYS = platform.system()  # "Linux" | "Darwin" | "Windows"
+
+
+def _rd_apps() -> Dict[str, List[List[str]]]:
+    if _SYS == "Windows":
+        return {
+            "chrome": [["cmd", "/c", "start", "", "chrome"], ["cmd", "/c", "start", "", "msedge"]],
+            "firefox": [["cmd", "/c", "start", "", "firefox"]],
+            "files": [["explorer", str(Path.home())]],
+            "terminal": [["wt"], ["powershell"], ["cmd"]],
+            "editor": [["notepad"]],
+        }
+    if _SYS == "Darwin":
+        return {
+            "chrome": [["open", "-a", "Google Chrome"], ["open", "-a", "Chromium"]],
+            "firefox": [["open", "-a", "Firefox"]],
+            "files": [["open", str(Path.home())]],
+            "terminal": [["open", "-a", "Terminal"], ["open", "-a", "iTerm"]],
+            "editor": [["open", "-a", "TextEdit"], ["open", "-a", "Visual Studio Code"]],
+        }
+    return {
+        "chrome": [["google-chrome"], ["chromium"], ["chromium-browser"]],
+        "firefox": [["firefox-esr"], ["firefox"]],
+        "files": [["thunar"], ["nautilus"], ["pcmanfm"], ["dolphin"], ["xdg-open", str(Path.home())]],
+        "terminal": [["qterminal"], ["xfce4-terminal"], ["gnome-terminal"], ["konsole"], ["x-terminal-emulator"], ["xterm"]],
+        "editor": [["mousepad"], ["gedit"], ["kate"], ["code"]],
+    }
 
 
 class RemoteDesktop:
     def __init__(self, conn: "LocalConnector") -> None:
         self.c = conn
         self.env = dict(os.environ)
-        self.env["DISPLAY"] = conn.cfg.display or os.environ.get("DISPLAY") or ":0"
-        if "XAUTHORITY" not in self.env and (Path.home() / ".Xauthority").exists():
-            self.env["XAUTHORITY"] = str(Path.home() / ".Xauthority")
-        os.environ.setdefault("DISPLAY", self.env["DISPLAY"])
-        if "XAUTHORITY" in self.env:
-            os.environ.setdefault("XAUTHORITY", self.env["XAUTHORITY"])
-        self.viewers: Dict[str, Dict[str, Any]] = {}   # viewer -> {q, w, fps, inflight, last}
+        if _SYS == "Linux":
+            self.env["DISPLAY"] = conn.cfg.display or os.environ.get("DISPLAY") or ":0"
+            if "XAUTHORITY" not in self.env and (Path.home() / ".Xauthority").exists():
+                self.env["XAUTHORITY"] = str(Path.home() / ".Xauthority")
+            os.environ.setdefault("DISPLAY", self.env["DISPLAY"])
+            if "XAUTHORITY" in self.env:
+                os.environ.setdefault("XAUTHORITY", self.env["XAUTHORITY"])
+        self.viewers: Dict[str, Dict[str, Any]] = {}
         self.loop_task: Optional[asyncio.Task] = None
         self.size = (0, 0)
         self.root = Path(os.path.expanduser(conn.cfg.rd_files_root)).resolve()
+        self._input_backend: Optional[str] = None   # "xdotool" | "pynput"
+        self._mouse = self._kb = None
 
     async def reply(self, viewer: str, msg: Dict[str, Any]) -> None:
         msg["viewer"] = viewer
         await self.c._raw_send(msg)
 
-    # ---------------------------------------------------------------- dispatch
     async def handle(self, mtype: str, msg: Dict[str, Any]) -> None:
         viewer = str(msg.get("viewer") or "")
         if not viewer:
@@ -773,19 +796,20 @@ class RemoteDesktop:
             self.viewers.pop(viewer, None)
             return
         if not self.c.cfg.remote_desktop:
-            await self.reply(viewer, {"type": "RD_ERROR", "error": "Remote desktop is off on this machine. Restart the connector with --remote-desktop."})
+            await self.reply(viewer, {"type": "RD_ERROR", "error": "Remote desktop is off. Restart the connector with --remote-desktop."})
             return
         if RD_KILL_FILE.exists():
             self.viewers.clear()
-            await self.reply(viewer, {"type": "RD_ERROR", "error": "Remote desktop is blocked on the machine (kill switch ~/.bridgebot/remote_desktop_off)."})
+            await self.reply(viewer, {"type": "RD_ERROR", "error": f"Remote desktop blocked (kill switch {RD_KILL_FILE})."})
             return
         try:
             if mtype == "RD_START":
                 v = self.viewers.setdefault(viewer, {"inflight": 0})
-                v.update(q=int(min(90, max(10, msg.get("quality", 55)))), w=int(min(2560, max(320, msg.get("width", 1280)))),
+                v.update(q=int(min(90, max(10, msg.get("quality", 55)))),
+                         w=int(min(2560, max(320, msg.get("width", 1280)))),
                          fps=float(min(15, max(0.5, msg.get("fps", 6)))), last=time.time())
                 v["inflight"] = 0
-                log.warning("🖥️  remote desktop viewer connected (%s)", viewer[:8])
+                log.warning("🖥️  remote desktop viewer connected (%s) on %s", viewer[:8], _SYS)
                 self._notify("BridgeBot: remote desktop session started")
                 if self.loop_task is None or self.loop_task.done():
                     self.loop_task = asyncio.create_task(self._frames())
@@ -795,14 +819,13 @@ class RemoteDesktop:
                     v["inflight"] = max(0, v["inflight"] - 1)
                     v["last"] = time.time()
             elif mtype == "RD_INPUT":
-                await self._input(msg)
+                await asyncio.to_thread(self._input_sync, msg)
                 if viewer in self.viewers:
                     self.viewers[viewer]["last"] = time.time()
             elif mtype == "RD_CLIP_GET":
-                out = await self._run(["xclip", "-selection", "clipboard", "-o"], capture=True)
-                await self.reply(viewer, {"type": "RD_CLIP", "text": (out or "")[:100000]})
+                await self.reply(viewer, {"type": "RD_CLIP", "text": (await asyncio.to_thread(self._clip_get))[:100000]})
             elif mtype == "RD_CLIP_SET":
-                await self._run(["xclip", "-selection", "clipboard"], stdin=str(msg.get("text", ""))[:100000])
+                await asyncio.to_thread(self._clip_set, str(msg.get("text", ""))[:100000])
                 await self.reply(viewer, {"type": "RD_OK", "what": "clipboard"})
             elif mtype == "RD_LAUNCH":
                 await self.reply(viewer, {"type": "RD_OK", "what": "launch", "detail": self._launch(str(msg.get("app", "")), msg.get("url"))})
@@ -813,26 +836,32 @@ class RemoteDesktop:
             elif mtype == "RD_PUT":
                 await self.reply(viewer, {"type": "RD_OK", "what": "upload", "detail": self._put(str(msg.get("path", "")), str(msg.get("data", "")))})
             elif mtype == "RD_OPEN":
-                p = self._safe(str(msg.get("path", "")))
-                subprocess.Popen(["xdg-open", str(p)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-                await self.reply(viewer, {"type": "RD_OK", "what": "open", "detail": p.name})
+                await self.reply(viewer, {"type": "RD_OK", "what": "open", "detail": self._open_path(self._safe(str(msg.get("path", ""))))})
         except Exception as exc:  # noqa: BLE001
             await self.reply(viewer, {"type": "RD_ERROR", "error": f"{mtype}: {exc}"})
 
     def _notify(self, text: str) -> None:
         try:
-            subprocess.Popen(["notify-send", "-a", "BridgeBot", text], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if _SYS == "Darwin":
+                subprocess.Popen(["osascript", "-e", f'display notification "{text.replace(chr(34), "")}" with title "BridgeBot"'],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif _SYS == "Windows":
+                subprocess.Popen(["powershell", "-NoProfile", "-Command",
+                                  f"[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]> $null; Write-Host '{text}'"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.Popen(["notify-send", "-a", "BridgeBot", text], env=self.env,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
             pass
 
-    # ---------------------------------------------------------------- screen
     def _grab(self, width: int, quality: int) -> Tuple[bytes, int, int]:
         import io
         try:
             import mss  # type: ignore
             from PIL import Image  # type: ignore
         except ImportError as exc:
-            raise RuntimeError("missing python packages: pip install mss pillow") from exc
+            raise RuntimeError("missing packages: pip install mss pillow") from exc
         if not hasattr(self, "_mss"):
             self._mss = getattr(mss, "MSS", mss.mss)()
         mon = self._mss.monitors[0]
@@ -847,10 +876,12 @@ class RemoteDesktop:
 
     async def _frames(self) -> None:
         last_hash: Dict[str, Any] = {}
+        tip = ("On Windows/Mac install mss pillow. On Linux X11 also need xdotool (or pynput). "
+               "macOS: allow Screen Recording for Terminal/Python in System Settings → Privacy.")
         while self.viewers:
             now = time.time()
             for vid, v in list(self.viewers.items()):
-                if now - v.get("last", now) > 30:          # viewer vanished without RD_STOP
+                if now - v.get("last", now) > 30:
                     self.viewers.pop(vid, None)
             ready = [(vid, v) for vid, v in self.viewers.items() if v["inflight"] < 2]
             if not ready:
@@ -862,12 +893,12 @@ class RemoteDesktop:
                 try:
                     jpg, sw, sh = await asyncio.to_thread(self._grab, v["w"], v["q"])
                 except Exception as exc:  # noqa: BLE001
-                    await self.reply(vid, {"type": "RD_ERROR", "error": f"screen capture failed: {exc}. Is this an X11 session (not Wayland) with DISPLAY={self.env['DISPLAY']}?"})
+                    await self.reply(vid, {"type": "RD_ERROR", "error": f"screen capture failed: {exc}. {tip}"})
                     self.viewers.pop(vid, None)
                     continue
                 h = hash(jpg)
                 if last_hash.get(vid) == h and now - v.get("sent", 0) < 2:
-                    continue                                # screen unchanged: skip
+                    continue
                 last_hash[vid] = h
                 v["inflight"] += 1
                 v["sent"] = time.time()
@@ -875,71 +906,208 @@ class RemoteDesktop:
             await asyncio.sleep(max(0.0, 1.0 / fps - (time.time() - t0)))
         log.warning("🖥️  remote desktop: no viewers, streaming stopped")
 
-    # ---------------------------------------------------------------- input
-    async def _run(self, argv: List[str], capture: bool = False, stdin: Optional[str] = None) -> Optional[str]:
-        proc = await asyncio.create_subprocess_exec(*argv, env=self.env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                                                    stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.PIPE)
+    def _ensure_pynput(self) -> None:
+        if self._mouse is not None:
+            return
         try:
-            out, err = await asyncio.wait_for(proc.communicate(stdin.encode() if stdin is not None else None), timeout=5)
-        except asyncio.TimeoutError:
-            proc.kill()
-            if capture:
-                return ""
-            raise RuntimeError(f"{argv[0]} timed out")
-        if proc.returncode and not capture:
-            raise RuntimeError((err or b"").decode(errors="replace").strip()[:300] or f"{argv[0]} failed")
-        return out.decode(errors="replace") if capture and out else None
+            from pynput.mouse import Controller as MC, Button  # type: ignore
+            from pynput.keyboard import Controller as KC, Key  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("pip install pynput  (macOS: also grant Accessibility to Terminal/Python)") from exc
+        self._mouse, self._kb = MC(), KC()
+        self._Button, self._Key = Button, Key
 
-    async def _input(self, m: Dict[str, Any]) -> None:
-        act = str(m.get("action", ""))
+    def _backend(self) -> str:
+        if self._input_backend:
+            return self._input_backend
+        if _SYS == "Linux" and shutil.which("xdotool"):
+            self._input_backend = "xdotool"
+        else:
+            self._ensure_pynput()
+            self._input_backend = "pynput"
+        return self._input_backend
+
+    def _xy(self, m: Dict[str, Any]) -> Tuple[int, int]:
         sw, sh = self.size if self.size[0] else (1920, 1080)
-        def xy() -> List[str]:
-            x = int(float(m.get("x", 0)) * sw); y = int(float(m.get("y", 0)) * sh)
-            return [str(max(0, min(sw - 1, x))), str(max(0, min(sh - 1, y)))]
+        x = int(float(m.get("x", 0)) * sw)
+        y = int(float(m.get("y", 0)) * sh)
+        return max(0, min(sw - 1, x)), max(0, min(sh - 1, y))
+
+    def _run_sync(self, argv: List[str], capture: bool = False, stdin: Optional[str] = None) -> Optional[str]:
+        r = subprocess.run(argv, env=self.env, input=stdin.encode() if stdin is not None else None,
+                           capture_output=True, timeout=2)
+        if r.returncode and not capture:
+            raise RuntimeError((r.stderr or b"").decode(errors="replace").strip()[:300] or f"{argv[0]} failed")
+        return r.stdout.decode(errors="replace") if capture and r.stdout else None
+
+    def _input_sync(self, m: Dict[str, Any]) -> None:
+        if self._backend() == "xdotool":
+            self._input_xdotool(m)
+        else:
+            self._input_pynput(m)
+
+    def _input_xdotool(self, m: Dict[str, Any]) -> None:
+        act = str(m.get("action", ""))
+        x, y = self._xy(m)
         btn = str(int(m.get("button", 1))) if str(m.get("button", 1)).isdigit() and int(m.get("button", 1)) in (1, 2, 3) else "1"
         if act == "move":
-            await self._run(["xdotool", "mousemove", *xy()])
+            self._run_sync(["xdotool", "mousemove", str(x), str(y)])
         elif act == "click":
-            await self._run(["xdotool", "mousemove", *xy(), "click", "--repeat", str(min(3, max(1, int(m.get("count", 1))))), btn])
+            self._run_sync(["xdotool", "mousemove", str(x), str(y), "click", "--repeat",
+                            str(min(3, max(1, int(m.get("count", 1))))), btn])
         elif act == "down":
-            await self._run(["xdotool", "mousemove", *xy(), "mousedown", btn])
+            self._run_sync(["xdotool", "mousemove", str(x), str(y), "mousedown", btn])
         elif act == "up":
-            await self._run(["xdotool", "mousemove", *xy(), "mouseup", btn])
+            self._run_sync(["xdotool", "mousemove", str(x), str(y), "mouseup", btn])
         elif act == "scroll":
-            dy = int(m.get("dy", 0)); dx = int(m.get("dx", 0))
-            args = ["xdotool"]
-            if "x" in m:
-                args += ["mousemove", *xy()]
+            dy, dx = int(m.get("dy", 0)), int(m.get("dx", 0))
+            args = ["xdotool", "mousemove", str(x), str(y)] if "x" in m else ["xdotool"]
             if dy:
                 args += ["click", "--repeat", str(min(20, abs(dy))), "5" if dy > 0 else "4"]
             if dx:
                 args += ["click", "--repeat", str(min(20, abs(dx))), "7" if dx > 0 else "6"]
             if len(args) > 1:
-                await self._run(args)
+                self._run_sync(args)
         elif act == "key":
             keys = str(m.get("keys", ""))
             if not re.fullmatch(r"[A-Za-z0-9_+ ]{1,80}", keys):
                 raise ValueError("bad key name")
-            await self._run(["xdotool", "key", "--clearmodifiers", *keys.split()])
+            self._run_sync(["xdotool", "key", "--clearmodifiers", *keys.split()])
         elif act == "type":
-            await self._run(["xdotool", "type", "--delay", "8", "--", str(m.get("text", ""))[:2000]])
+            self._run_sync(["xdotool", "type", "--delay", "8", "--", str(m.get("text", ""))[:2000]])
         else:
             raise ValueError(f"unknown input action {act!r}")
 
+    def _pynput_btn(self, button: Any):
+        b = int(button) if str(button).isdigit() else 1
+        return {1: self._Button.left, 2: self._Button.middle, 3: self._Button.right}.get(b, self._Button.left)
+
+    def _pynput_keys(self, keys: str) -> list:
+        Key = self._Key
+        alias = {
+            "return": Key.enter, "enter": Key.enter, "backspace": Key.backspace, "escape": Key.esc, "esc": Key.esc,
+            "tab": Key.tab, "up": Key.up, "down": Key.down, "left": Key.left, "right": Key.right,
+            "delete": Key.delete, "home": Key.home, "end": Key.end, "prior": Key.page_up, "next": Key.page_down,
+            "space": Key.space, "super": Key.cmd if _SYS == "Darwin" else Key.cmd_l,
+            "ctrl": Key.ctrl, "alt": Key.alt, "shift": Key.shift, "cmd": Key.cmd,
+            "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4, "f5": Key.f5, "f6": Key.f6,
+            "f7": Key.f7, "f8": Key.f8, "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
+        }
+        out = []
+        for part in keys.replace(" ", "+").split("+"):
+            p = part.strip().lower()
+            if not p:
+                continue
+            if p in alias:
+                out.append(alias[p])
+            elif len(p) == 1:
+                out.append(p)
+            else:
+                raise ValueError(f"unsupported key {part!r}")
+        return out
+
+    def _input_pynput(self, m: Dict[str, Any]) -> None:
+        self._ensure_pynput()
+        act = str(m.get("action", ""))
+        x, y = self._xy(m)
+        if act == "move":
+            self._mouse.position = (x, y)
+        elif act == "click":
+            self._mouse.position = (x, y)
+            self._mouse.click(self._pynput_btn(m.get("button", 1)), min(3, max(1, int(m.get("count", 1)))))
+        elif act == "down":
+            self._mouse.position = (x, y)
+            self._mouse.press(self._pynput_btn(m.get("button", 1)))
+        elif act == "up":
+            self._mouse.position = (x, y)
+            self._mouse.release(self._pynput_btn(m.get("button", 1)))
+        elif act == "scroll":
+            if "x" in m:
+                self._mouse.position = (x, y)
+            self._mouse.scroll(int(m.get("dx", 0)), -int(m.get("dy", 0)))  # pynput: +dy = up
+        elif act == "key":
+            keys = str(m.get("keys", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_+ ]{1,80}", keys):
+                raise ValueError("bad key name")
+            parts = self._pynput_keys(keys)
+            mods, finals = parts[:-1], parts[-1:]
+            for k in mods:
+                self._kb.press(k)
+            try:
+                for k in finals:
+                    self._kb.press(k)
+                    self._kb.release(k)
+            finally:
+                for k in reversed(mods):
+                    self._kb.release(k)
+        elif act == "type":
+            self._kb.type(str(m.get("text", ""))[:2000])
+        else:
+            raise ValueError(f"unknown input action {act!r}")
+
+    def _clip_get(self) -> str:
+        if _SYS == "Darwin":
+            return self._run_sync(["pbpaste"], capture=True) or ""
+        if _SYS == "Linux" and shutil.which("xclip"):
+            try:
+                return self._run_sync(["xclip", "-selection", "clipboard", "-o"], capture=True) or ""
+            except Exception:
+                pass
+        try:
+            import pyperclip  # type: ignore
+            return pyperclip.paste() or ""
+        except Exception as exc:
+            raise RuntimeError("clipboard read failed (pip install pyperclip; on Linux also: apt install xclip)") from exc
+
+    def _clip_set(self, text: str) -> None:
+        if _SYS == "Darwin":
+            self._run_sync(["pbcopy"], stdin=text)
+            return
+        if _SYS == "Linux" and shutil.which("xclip"):
+            try:
+                # -loops 1 returns after one paste request; avoids hanging on headless X
+                self._run_sync(["xclip", "-selection", "clipboard", "-loops", "1"], stdin=text)
+                return
+            except Exception:
+                pass
+        try:
+            import pyperclip  # type: ignore
+            pyperclip.copy(text)
+        except Exception as exc:
+            raise RuntimeError("clipboard write failed (pip install pyperclip; on Linux also: apt install xclip)") from exc
+
     def _launch(self, app: str, url: Any = None) -> str:
-        cands = RD_APPS.get(app)
+        cands = _rd_apps().get(app)
         if not cands:
             raise ValueError(f"unknown app {app!r}")
         for argv in cands:
-            if shutil.which(argv[0]):
-                extra = [str(url)] if url and app in ("chrome", "firefox") and re.match(r"^https?://", str(url)) else []
-                subprocess.Popen(argv + extra, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-                return argv[0]
+            if argv[0] not in ("cmd", "open", "explorer") and not shutil.which(argv[0]):
+                continue
+            cmd = list(argv)
+            if url and app in ("chrome", "firefox") and re.match(r"^https?://", str(url)):
+                cmd.append(str(url))
+            try:
+                kwargs: Dict[str, Any] = {"env": self.env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+                if _SYS != "Windows":
+                    kwargs["start_new_session"] = True
+                subprocess.Popen(cmd, **kwargs)
+                return " ".join(cmd[:3])
+            except OSError:
+                continue
         raise RuntimeError(f"no {app} program installed")
 
-    # ---------------------------------------------------------------- files (jailed to rd_files_root)
+    def _open_path(self, p: Path) -> str:
+        if _SYS == "Windows":
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        elif _SYS == "Darwin":
+            subprocess.Popen(["open", str(p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", str(p)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        return p.name
+
     def _safe(self, rel: str) -> Path:
-        p = (self.root / rel.lstrip("/")).resolve()
+        p = (self.root / rel.lstrip("/\\")).resolve()
         if p != self.root and self.root not in p.parents:
             raise PermissionError("outside the allowed folder")
         return p
@@ -953,7 +1121,7 @@ class RemoteDesktop:
                 items.append({"name": e.name, "dir": e.is_dir(), "size": st.st_size, "mtime": int(st.st_mtime)})
             except OSError:
                 continue
-        return {"path": str(p.relative_to(self.root)) if p != self.root else "", "items": items}
+        return {"path": str(p.relative_to(self.root)).replace("\\", "/") if p != self.root else "", "items": items}
 
     def _get(self, rel: str) -> Dict[str, Any]:
         p = self._safe(rel)
@@ -971,6 +1139,7 @@ class RemoteDesktop:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(raw)
         return p.name
+
 
 
 async def _main() -> None:

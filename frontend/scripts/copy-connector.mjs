@@ -12,5 +12,5 @@ if (!src) {
   process.exit(0);
 }
 mkdirSync(out, { recursive: true });
-for (const f of ["local_connector.py", "connector_config.example.json", "requirements.txt", "bridgebot_sdk.py"]) copyFileSync(join(src, f), join(out, f));
+for (const f of ["local_connector.py", "connector_config.example.json", "requirements.txt", "bridgebot_sdk.py", "install.sh", "install.ps1"]) copyFileSync(join(src, f), join(out, f));
 console.log(`[copy-connector] copied connector files from ${src}`);
