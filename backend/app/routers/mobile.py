@@ -9,15 +9,17 @@ from __future__ import annotations
 import secrets
 import time
 import uuid
+from pathlib import Path
 from typing import Dict, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..billing.service import enforce_machine_limit
+from ..config import settings
 from ..database import get_db
 from ..deps import get_current_user
 from ..hub import hub, kick
@@ -43,6 +45,17 @@ def _gc() -> None:
     now = time.time()
     for k in [k for k, v in _codes.items() if v[2] < now]:
         _codes.pop(k, None)
+
+
+def _apk_path() -> Path | None:
+    fe = Path(settings.frontend_dir).expanduser()
+    if not fe.is_absolute():
+        fe = (Path(__file__).resolve().parents[2] / fe).resolve()
+    for candidate in (fe / "downloads" / "live-mobilelty.apk",
+                      Path(__file__).resolve().parents[3] / "frontend" / "public" / "downloads" / "live-mobilelty.apk"):
+        if candidate.is_file() and candidate.stat().st_size > 1000:
+            return candidate
+    return None
 
 
 @router.post("/api/mobile/pair-code")
@@ -88,6 +101,10 @@ async def pair(body: PairIn, request: Request) -> dict:
 
 
 @router.get("/downloads/live-mobilelty.apk", include_in_schema=False)
-async def apk() -> RedirectResponse:
-    """Latest signed APK, built for free by GitHub Actions and attached to the GitHub release."""
+async def apk():
+    """Serve the signed APK from the site when bundled; otherwise redirect to the GitHub release."""
+    path = _apk_path()
+    if path is not None:
+        return FileResponse(path, media_type="application/vnd.android.package-archive",
+                            filename="live-mobilelty.apk")
     return RedirectResponse(APK_URL, status_code=302)

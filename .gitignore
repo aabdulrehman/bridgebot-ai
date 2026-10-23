@@ -9,3 +9,8 @@ frontend/out/
 connector/skills/
 connector/connector_config.json
 *.zip
+android/**/local.properties
+android/**/keystore/
+android/**/.gradle/
+android/**/build/
+android/**/*.jks

@@ -1,4 +1,5 @@
 name: Build Live Mobilelty APK
+# Note: requires GitHub Actions minutes. If the account is billing-locked, build on a local JDK+SDK and `gh release upload live-mobilelty-v1 live-mobilelty.apk`.
 
 on:
   push:
