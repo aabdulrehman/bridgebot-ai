@@ -50,6 +50,7 @@ class ConnectionHub:
     """Tracks live sockets and routes messages between them."""
 
     def __init__(self) -> None:
+        self.viewers: Dict[str, Any] = {}
         self.connectors: Dict[uuid.UUID, ConnectorSession] = {}
         self.dashboards: Dict[uuid.UUID, Set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
@@ -109,6 +110,23 @@ class ConnectionHub:
             return False
 
     # ------------------------------------------------------------------ dashboards
+    # Remote desktop: each dashboard socket gets a viewer id so frames go only to the screen that asked.
+    def add_viewer(self, viewer_id: str, user_id: uuid.UUID, ws: WebSocket) -> None:
+        self.viewers[viewer_id] = (user_id, ws)
+
+    def remove_viewer(self, viewer_id: str) -> None:
+        self.viewers.pop(viewer_id, None)
+
+    async def send_to_viewer(self, viewer_id: str, user_id: uuid.UUID, message: Dict[str, Any]) -> bool:
+        v = self.viewers.get(viewer_id)
+        if v is None or v[0] != user_id:
+            return False
+        try:
+            await v[1].send_json(message)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     async def add_dashboard(self, user_id: uuid.UUID, ws: WebSocket) -> None:
         async with self._lock:
             self.dashboards[user_id].add(ws)

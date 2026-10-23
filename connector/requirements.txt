@@ -1,1 +1,4 @@
 websockets>=12
+# optional, for --remote-desktop (Linux X11 also needs: sudo apt install xdotool xclip)
+mss>=9
+pillow>=10

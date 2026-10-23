@@ -37,15 +37,17 @@ import platform
 import random
 import re
 import shlex
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 import time
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import websockets
 
@@ -58,7 +60,7 @@ except ImportError:  # pragma: no cover — legacy websockets < 13
 
     _HEADER_KW = "extra_headers"
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 IS_WINDOWS = os.name == "nt"
 log = logging.getLogger("bridgebot.connector")
 
@@ -108,6 +110,10 @@ class ConnectorConfig:
     allowed_tunnel_ports: Optional[List[int]] = None     # e.g. [5678, 8080]; None = any port you create a tunnel for
     tunnel_host: str = "127.0.0.1"                       # only loopback by default
     max_concurrent_tunnel_requests: int = 16
+    # Remote desktop (opt-in): stream this screen to YOUR dashboard and accept mouse/keyboard/file actions from it.
+    remote_desktop: bool = False
+    display: Optional[str] = None                        # e.g. ":0"; default = $DISPLAY or ":0"
+    rd_files_root: str = "~"                             # file browser is jailed to this folder
 
     @property
     def ws_url(self) -> str:
@@ -133,6 +139,7 @@ def load_config(argv: Optional[List[str]] = None) -> ConnectorConfig:
     p.add_argument("--allow-any-command", action="store_true", help="DANGEROUS: disable the command allowlist")
     p.add_argument("--no-tunnels", action="store_true", help="refuse HTTP tunnel requests on this machine")
     p.add_argument("--tunnel-ports", help="comma-separated local ports tunnels may reach, e.g. 5678,8080")
+    p.add_argument("--remote-desktop", action="store_true", help="allow YOUR dashboard to view/control this screen (X11)")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
 
@@ -175,6 +182,8 @@ def load_config(argv: Optional[List[str]] = None) -> ConnectorConfig:
         cfg.allow_any_command = True
     if args.no_tunnels or os.getenv("BRIDGEBOT_NO_TUNNELS", "").lower() in ("1", "true", "yes"):
         cfg.tunnels_enabled = False
+    if args.remote_desktop or os.getenv("BRIDGEBOT_REMOTE_DESKTOP", "").lower() in ("1", "true", "yes"):
+        cfg.remote_desktop = True
     ports = args.tunnel_ports or os.getenv("BRIDGEBOT_TUNNEL_PORTS")
     if ports:
         cfg.allowed_tunnel_ports = [int(x) for x in str(ports).split(",") if x.strip()]
@@ -214,6 +223,7 @@ class LocalConnector:
         self._unacked: "collections.deque[Dict[str, Any]]" = collections.deque(maxlen=OUTBOX_MAX)
         self._acks = False          # enabled when the cloud's WELCOME says it supports acks
         self._server_heartbeat_timeout_s = 90.0
+        self._rd: Optional["RemoteDesktop"] = None
 
     # ------------------------------------------------------------------ transport
     async def send(self, message: Dict[str, Any]) -> bool:
@@ -355,7 +365,8 @@ class LocalConnector:
             "platform": f"{platform.system()} {platform.release()} / py{platform.python_version()}",
             "agents": self.cfg.agents,
             "allowed_commands": "*" if self.cfg.allow_any_command else self.cfg.allowed_commands,
-            "features": ["tasks", "skills", "acks"] + (["tunnel"] if self.cfg.tunnels_enabled else []),
+            "features": ["tasks", "skills", "acks"] + (["tunnel"] if self.cfg.tunnels_enabled else [])
+                        + (["remote_desktop"] if self.cfg.remote_desktop else []),
             "stream": self._stream,
         })
         async with self._flush_lock:
@@ -415,6 +426,10 @@ class LocalConnector:
             self._spawn(self._handle_skill(msg))
         elif mtype == "TUNNEL_REQUEST":
             self._spawn(self._handle_tunnel(msg))
+        elif mtype.startswith("RD_"):
+            if self._rd is None:
+                self._rd = RemoteDesktop(self)
+            self._spawn(self._rd.handle(mtype, msg))
         elif mtype == "GOODBYE":   # the cloud is closing us on purpose; remember why (close frames can get lost)
             self._goodbye = (int(msg.get("code") or 0), str(msg.get("reason") or ""))
             if self.ws is not None:
@@ -711,6 +726,251 @@ def _post_json(url: str, data: Dict[str, Any]) -> int:
     except Exception as exc:  # noqa: BLE001
         log.warning("skill hook failed: %s", exc)
         return -1
+
+
+
+# =============================================================================
+# Remote desktop (opt-in with --remote-desktop). Only the machine owner's dashboard can reach this:
+# the cloud forwards RD_* messages solely from dashboards logged in as the connector's owner.
+# Kill switch: `touch ~/.bridgebot/remote_desktop_off` (checked on every message) or stop the service.
+# =============================================================================
+RD_KILL_FILE = Path.home() / ".bridgebot" / "remote_desktop_off"
+RD_APPS = {
+    "chrome": [["google-chrome"], ["chromium"], ["chromium-browser"]],
+    "firefox": [["firefox-esr"], ["firefox"]],
+    "files": [["thunar"], ["nautilus"], ["pcmanfm"], ["dolphin"], ["xdg-open", str(Path.home())]],
+    "terminal": [["qterminal"], ["xfce4-terminal"], ["gnome-terminal"], ["konsole"], ["x-terminal-emulator"], ["xterm"]],
+    "editor": [["mousepad"], ["gedit"], ["kate"], ["code"]],
+}
+RD_MAX_FILE = 12 * 1024 * 1024
+
+
+class RemoteDesktop:
+    def __init__(self, conn: "LocalConnector") -> None:
+        self.c = conn
+        self.env = dict(os.environ)
+        self.env["DISPLAY"] = conn.cfg.display or os.environ.get("DISPLAY") or ":0"
+        if "XAUTHORITY" not in self.env and (Path.home() / ".Xauthority").exists():
+            self.env["XAUTHORITY"] = str(Path.home() / ".Xauthority")
+        os.environ.setdefault("DISPLAY", self.env["DISPLAY"])
+        if "XAUTHORITY" in self.env:
+            os.environ.setdefault("XAUTHORITY", self.env["XAUTHORITY"])
+        self.viewers: Dict[str, Dict[str, Any]] = {}   # viewer -> {q, w, fps, inflight, last}
+        self.loop_task: Optional[asyncio.Task] = None
+        self.size = (0, 0)
+        self.root = Path(os.path.expanduser(conn.cfg.rd_files_root)).resolve()
+
+    async def reply(self, viewer: str, msg: Dict[str, Any]) -> None:
+        msg["viewer"] = viewer
+        await self.c._raw_send(msg)
+
+    # ---------------------------------------------------------------- dispatch
+    async def handle(self, mtype: str, msg: Dict[str, Any]) -> None:
+        viewer = str(msg.get("viewer") or "")
+        if not viewer:
+            return
+        if mtype == "RD_STOP":
+            self.viewers.pop(viewer, None)
+            return
+        if not self.c.cfg.remote_desktop:
+            await self.reply(viewer, {"type": "RD_ERROR", "error": "Remote desktop is off on this machine. Restart the connector with --remote-desktop."})
+            return
+        if RD_KILL_FILE.exists():
+            self.viewers.clear()
+            await self.reply(viewer, {"type": "RD_ERROR", "error": "Remote desktop is blocked on the machine (kill switch ~/.bridgebot/remote_desktop_off)."})
+            return
+        try:
+            if mtype == "RD_START":
+                v = self.viewers.setdefault(viewer, {"inflight": 0})
+                v.update(q=int(min(90, max(10, msg.get("quality", 55)))), w=int(min(2560, max(320, msg.get("width", 1280)))),
+                         fps=float(min(15, max(0.5, msg.get("fps", 6)))), last=time.time())
+                v["inflight"] = 0
+                log.warning("🖥️  remote desktop viewer connected (%s)", viewer[:8])
+                self._notify("BridgeBot: remote desktop session started")
+                if self.loop_task is None or self.loop_task.done():
+                    self.loop_task = asyncio.create_task(self._frames())
+            elif mtype == "RD_ACK":
+                v = self.viewers.get(viewer)
+                if v:
+                    v["inflight"] = max(0, v["inflight"] - 1)
+                    v["last"] = time.time()
+            elif mtype == "RD_INPUT":
+                await self._input(msg)
+                if viewer in self.viewers:
+                    self.viewers[viewer]["last"] = time.time()
+            elif mtype == "RD_CLIP_GET":
+                out = await self._run(["xclip", "-selection", "clipboard", "-o"], capture=True)
+                await self.reply(viewer, {"type": "RD_CLIP", "text": (out or "")[:100000]})
+            elif mtype == "RD_CLIP_SET":
+                await self._run(["xclip", "-selection", "clipboard"], stdin=str(msg.get("text", ""))[:100000])
+                await self.reply(viewer, {"type": "RD_OK", "what": "clipboard"})
+            elif mtype == "RD_LAUNCH":
+                await self.reply(viewer, {"type": "RD_OK", "what": "launch", "detail": self._launch(str(msg.get("app", "")), msg.get("url"))})
+            elif mtype == "RD_LS":
+                await self.reply(viewer, {"type": "RD_LS", **self._ls(str(msg.get("path", "")))})
+            elif mtype == "RD_GET":
+                await self.reply(viewer, {"type": "RD_FILE", **self._get(str(msg.get("path", "")))})
+            elif mtype == "RD_PUT":
+                await self.reply(viewer, {"type": "RD_OK", "what": "upload", "detail": self._put(str(msg.get("path", "")), str(msg.get("data", "")))})
+            elif mtype == "RD_OPEN":
+                p = self._safe(str(msg.get("path", "")))
+                subprocess.Popen(["xdg-open", str(p)], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                await self.reply(viewer, {"type": "RD_OK", "what": "open", "detail": p.name})
+        except Exception as exc:  # noqa: BLE001
+            await self.reply(viewer, {"type": "RD_ERROR", "error": f"{mtype}: {exc}"})
+
+    def _notify(self, text: str) -> None:
+        try:
+            subprocess.Popen(["notify-send", "-a", "BridgeBot", text], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+
+    # ---------------------------------------------------------------- screen
+    def _grab(self, width: int, quality: int) -> Tuple[bytes, int, int]:
+        import io
+        try:
+            import mss  # type: ignore
+            from PIL import Image  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("missing python packages: pip install mss pillow") from exc
+        if not hasattr(self, "_mss"):
+            self._mss = getattr(mss, "MSS", mss.mss)()
+        mon = self._mss.monitors[0]
+        shot = self._mss.grab(mon)
+        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        self.size = shot.size
+        if img.width > width:
+            img = img.resize((width, int(img.height * width / img.width)), Image.BILINEAR)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=quality, optimize=False)
+        return buf.getvalue(), shot.size[0], shot.size[1]
+
+    async def _frames(self) -> None:
+        last_hash: Dict[str, Any] = {}
+        while self.viewers:
+            now = time.time()
+            for vid, v in list(self.viewers.items()):
+                if now - v.get("last", now) > 30:          # viewer vanished without RD_STOP
+                    self.viewers.pop(vid, None)
+            ready = [(vid, v) for vid, v in self.viewers.items() if v["inflight"] < 2]
+            if not ready:
+                await asyncio.sleep(0.03)
+                continue
+            fps = max(v["fps"] for _, v in ready)
+            t0 = time.time()
+            for vid, v in ready:
+                try:
+                    jpg, sw, sh = await asyncio.to_thread(self._grab, v["w"], v["q"])
+                except Exception as exc:  # noqa: BLE001
+                    await self.reply(vid, {"type": "RD_ERROR", "error": f"screen capture failed: {exc}. Is this an X11 session (not Wayland) with DISPLAY={self.env['DISPLAY']}?"})
+                    self.viewers.pop(vid, None)
+                    continue
+                h = hash(jpg)
+                if last_hash.get(vid) == h and now - v.get("sent", 0) < 2:
+                    continue                                # screen unchanged: skip
+                last_hash[vid] = h
+                v["inflight"] += 1
+                v["sent"] = time.time()
+                await self.reply(vid, {"type": "RD_FRAME", "jpg": base64.b64encode(jpg).decode(), "sw": sw, "sh": sh})
+            await asyncio.sleep(max(0.0, 1.0 / fps - (time.time() - t0)))
+        log.warning("🖥️  remote desktop: no viewers, streaming stopped")
+
+    # ---------------------------------------------------------------- input
+    async def _run(self, argv: List[str], capture: bool = False, stdin: Optional[str] = None) -> Optional[str]:
+        proc = await asyncio.create_subprocess_exec(*argv, env=self.env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                                    stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(stdin.encode() if stdin is not None else None), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            if capture:
+                return ""
+            raise RuntimeError(f"{argv[0]} timed out")
+        if proc.returncode and not capture:
+            raise RuntimeError((err or b"").decode(errors="replace").strip()[:300] or f"{argv[0]} failed")
+        return out.decode(errors="replace") if capture and out else None
+
+    async def _input(self, m: Dict[str, Any]) -> None:
+        act = str(m.get("action", ""))
+        sw, sh = self.size if self.size[0] else (1920, 1080)
+        def xy() -> List[str]:
+            x = int(float(m.get("x", 0)) * sw); y = int(float(m.get("y", 0)) * sh)
+            return [str(max(0, min(sw - 1, x))), str(max(0, min(sh - 1, y)))]
+        btn = str(int(m.get("button", 1))) if str(m.get("button", 1)).isdigit() and int(m.get("button", 1)) in (1, 2, 3) else "1"
+        if act == "move":
+            await self._run(["xdotool", "mousemove", *xy()])
+        elif act == "click":
+            await self._run(["xdotool", "mousemove", *xy(), "click", "--repeat", str(min(3, max(1, int(m.get("count", 1))))), btn])
+        elif act == "down":
+            await self._run(["xdotool", "mousemove", *xy(), "mousedown", btn])
+        elif act == "up":
+            await self._run(["xdotool", "mousemove", *xy(), "mouseup", btn])
+        elif act == "scroll":
+            dy = int(m.get("dy", 0)); dx = int(m.get("dx", 0))
+            args = ["xdotool"]
+            if "x" in m:
+                args += ["mousemove", *xy()]
+            if dy:
+                args += ["click", "--repeat", str(min(20, abs(dy))), "5" if dy > 0 else "4"]
+            if dx:
+                args += ["click", "--repeat", str(min(20, abs(dx))), "7" if dx > 0 else "6"]
+            if len(args) > 1:
+                await self._run(args)
+        elif act == "key":
+            keys = str(m.get("keys", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_+ ]{1,80}", keys):
+                raise ValueError("bad key name")
+            await self._run(["xdotool", "key", "--clearmodifiers", *keys.split()])
+        elif act == "type":
+            await self._run(["xdotool", "type", "--delay", "8", "--", str(m.get("text", ""))[:2000]])
+        else:
+            raise ValueError(f"unknown input action {act!r}")
+
+    def _launch(self, app: str, url: Any = None) -> str:
+        cands = RD_APPS.get(app)
+        if not cands:
+            raise ValueError(f"unknown app {app!r}")
+        for argv in cands:
+            if shutil.which(argv[0]):
+                extra = [str(url)] if url and app in ("chrome", "firefox") and re.match(r"^https?://", str(url)) else []
+                subprocess.Popen(argv + extra, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                return argv[0]
+        raise RuntimeError(f"no {app} program installed")
+
+    # ---------------------------------------------------------------- files (jailed to rd_files_root)
+    def _safe(self, rel: str) -> Path:
+        p = (self.root / rel.lstrip("/")).resolve()
+        if p != self.root and self.root not in p.parents:
+            raise PermissionError("outside the allowed folder")
+        return p
+
+    def _ls(self, rel: str) -> Dict[str, Any]:
+        p = self._safe(rel)
+        items = []
+        for e in sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))[:500]:
+            try:
+                st = e.stat()
+                items.append({"name": e.name, "dir": e.is_dir(), "size": st.st_size, "mtime": int(st.st_mtime)})
+            except OSError:
+                continue
+        return {"path": str(p.relative_to(self.root)) if p != self.root else "", "items": items}
+
+    def _get(self, rel: str) -> Dict[str, Any]:
+        p = self._safe(rel)
+        if not p.is_file():
+            raise FileNotFoundError(rel)
+        if p.stat().st_size > RD_MAX_FILE:
+            raise ValueError("file larger than 12 MB")
+        return {"name": p.name, "data": base64.b64encode(p.read_bytes()).decode()}
+
+    def _put(self, rel: str, data: str) -> str:
+        p = self._safe(rel)
+        raw = base64.b64decode(data)
+        if len(raw) > RD_MAX_FILE:
+            raise ValueError("file larger than 12 MB")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(raw)
+        return p.name
 
 
 async def _main() -> None:

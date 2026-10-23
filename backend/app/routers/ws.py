@@ -186,6 +186,11 @@ async def connector_ws(ws: WebSocket) -> None:
                     last_hb_write = now
                     jobs.put_nowait(lambda: _set_status(connector_id, "ONLINE"))
                 continue
+            if mtype.startswith("RD_"):          # remote desktop reply: only to the requesting viewer, never stored
+                vid = str(msg.get("viewer") or "")
+                if vid:
+                    await hub.send_to_viewer(vid, user_id, {**msg, "type": mtype, "connector_id": str(connector_id)})
+                continue
             if mtype == "TUNNEL_RESPONSE":
                 hub.resolve_tunnel(connector_id, msg)   # never relayed/audited: bodies can be large
                 continue
@@ -261,6 +266,9 @@ async def dashboard_ws(ws: WebSocket) -> None:
 
     await ws.accept()
     await hub.add_dashboard(user_id, ws)
+    viewer_id = uuid.uuid4().hex
+    hub.add_viewer(viewer_id, user_id, ws)
+    owned = {str(c.id) for c in conns}
     await ws.send_json({
         "type": "SNAPSHOT",
         "connectors": [{"connector_id": str(c.id), "machine_name": c.machine_name, "status": "ONLINE" if hub.is_online(c.id) else "OFFLINE"} for c in conns],
@@ -270,9 +278,36 @@ async def dashboard_ws(ws: WebSocket) -> None:
             text = await ws.receive_text()
             if text.strip().upper() in ("PING", '{"TYPE":"PING"}'):
                 await ws.send_json({"type": "PONG"})
+                continue
+            try:
+                msg = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict) or not str(msg.get("type", "")).upper().startswith("RD_"):
+                continue
+            cid = str(msg.get("connector_id") or "")
+            if cid not in owned:            # machine added after this socket opened? re-check ownership once
+                try:
+                    async with SessionLocal() as db:
+                        c = await db.get(Connector, uuid.UUID(cid))
+                    if c is not None and c.user_id == user_id:
+                        owned.add(cid)
+                except (ValueError, Exception):  # noqa: BLE001
+                    pass
+            if cid not in owned:
+                await ws.send_json({"type": "RD_ERROR", "connector_id": cid, "error": "Not your machine"})
+                continue
+            out = {k: v for k, v in msg.items() if k != "connector_id"}
+            out["type"] = str(msg["type"]).upper()
+            out["viewer"] = viewer_id
+            if not await hub.send_to_connector(uuid.UUID(cid), out):
+                await ws.send_json({"type": "RD_ERROR", "connector_id": cid, "error": "Machine is offline"})
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001
         log.debug("dashboard socket closed: %s", exc)
     finally:
+        hub.remove_viewer(viewer_id)
+        for cid in owned:
+            await hub.send_to_connector(uuid.UUID(cid), {"type": "RD_STOP", "viewer": viewer_id})
         await hub.remove_dashboard(user_id, ws)
