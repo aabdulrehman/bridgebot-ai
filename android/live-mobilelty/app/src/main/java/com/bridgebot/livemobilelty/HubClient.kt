@@ -60,7 +60,7 @@ class HubClient(
                 val hello = JSONObject()
                     .put("type", "HELLO")
                     .put("machine", deviceName)
-                    .put("version", "android-1.0.0")
+                    .put("version", "android-1.0.1")
                     .put("platform", "Android ${android.os.Build.VERSION.RELEASE}")
                     .put("agents", JSONArray())
                     .put("features", JSONArray().put("android").put("remote_desktop"))

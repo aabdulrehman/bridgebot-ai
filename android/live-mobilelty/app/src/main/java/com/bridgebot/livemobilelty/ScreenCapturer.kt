@@ -9,6 +9,8 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.DisplayMetrics
 import android.view.WindowManager
@@ -19,12 +21,32 @@ class ScreenCapturer(private val ctx: Context) {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    private var callback: MediaProjection.Callback? = null
     var screenW = 0; var screenH = 0; private set
 
-    fun start(resultCode: Int, data: Intent) {
+    /**
+     * @param onStopped called on the main thread when the system revokes capture (user stops,
+     *                  another app takes over, etc.). Caller should clear capturer and RD_ERROR viewers.
+     */
+    fun start(resultCode: Int, data: Intent, onStopped: (() -> Unit)? = null) {
         stop()
         val mpm = ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = mpm.getMediaProjection(resultCode, data)
+        val proj = mpm.getMediaProjection(resultCode, data)
+            ?: throw IllegalStateException("MediaProjection null — re-allow Screen capture in the app")
+        projection = proj
+        // Android 14+ (API 34): must register a Callback BEFORE createVirtualDisplay or it throws.
+        val cb = object : MediaProjection.Callback() {
+            override fun onStop() {
+                Handler(Looper.getMainLooper()).post {
+                    try { display?.release() } catch (_: Exception) {}
+                    try { reader?.close() } catch (_: Exception) {}
+                    display = null; reader = null; projection = null
+                    onStopped?.invoke()
+                }
+            }
+        }
+        callback = cb
+        proj.registerCallback(cb, Handler(Looper.getMainLooper()))
         val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
@@ -33,7 +55,7 @@ class ScreenCapturer(private val ctx: Context) {
         screenH = metrics.heightPixels
         val density = metrics.densityDpi
         reader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
-        display = projection!!.createVirtualDisplay(
+        display = proj.createVirtualDisplay(
             "LiveMobilelty", screenW, screenH, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             reader!!.surface, null, null
@@ -67,10 +89,15 @@ class ScreenCapturer(private val ctx: Context) {
     }
 
     fun stop() {
+        val proj = projection
+        val cb = callback
         try { display?.release() } catch (_: Exception) {}
         try { reader?.close() } catch (_: Exception) {}
-        try { projection?.stop() } catch (_: Exception) {}
-        display = null; reader = null; projection = null
+        if (proj != null && cb != null) {
+            try { proj.unregisterCallback(cb) } catch (_: Exception) {}
+        }
+        try { proj?.stop() } catch (_: Exception) {}
+        display = null; reader = null; projection = null; callback = null
     }
 
     companion object {

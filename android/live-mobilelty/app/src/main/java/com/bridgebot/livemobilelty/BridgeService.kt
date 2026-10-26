@@ -24,6 +24,12 @@ class BridgeService : Service() {
         const val ACTION_STOP = "com.bridgebot.livemobilelty.STOP"
         const val EXTRA_RESULT_CODE = "rc"
         const val EXTRA_RESULT_DATA = "rd"
+        private const val NULL_FRAME_WARN_MS = 2_000L
+        private const val NULL_FRAME_REPEAT_MS = 10_000L
+        private const val SECURE_APP_ERROR =
+            "No screen frames — leave secure apps (WhatsApp/banking) or re-allow Screen capture in Live Mobilelty"
+        private const val CAPTURE_STOPPED_ERROR =
+            "Screen capture stopped — re-allow in the app"
         @Volatile var running = false
         @Volatile var statusText = "Offline"
         var captureResultCode: Int = 0
@@ -57,6 +63,8 @@ class BridgeService : Service() {
             captureResultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
             @Suppress("DEPRECATION")
             captureData = intent.getParcelableExtra(EXTRA_RESULT_DATA)
+            // Force rebuild so a new MediaProjection.Callback is registered
+            capturer?.stop(); capturer = null
             ensureCapturer()
         }
         if (hub == null) connectHub()
@@ -138,15 +146,34 @@ class BridgeService : Service() {
         val data = captureData ?: return
         if (capturer == null) {
             capturer = ScreenCapturer(this).also {
-                try { it.start(captureResultCode, data) }
-                catch (e: Exception) { Log.e("LiveMobilelty", "capture start", e); capturer = null }
+                try {
+                    it.start(captureResultCode, data) {
+                        // System revoked MediaProjection (Android 14+ callback, or user stop)
+                        capturer = null
+                        captureData = null
+                        broadcastError(CAPTURE_STOPPED_ERROR)
+                        setStatus(CAPTURE_STOPPED_ERROR)
+                    }
+                } catch (e: Exception) {
+                    Log.e("LiveMobilelty", "capture start", e)
+                    capturer = null
+                    broadcastError("Screen capture failed: ${e.message ?: "re-allow in the app"}")
+                }
             }
+        }
+    }
+
+    private fun broadcastError(msg: String) {
+        for (vid in viewers.keys) {
+            reply(vid, JSONObject().put("type", "RD_ERROR").put("error", msg))
         }
     }
 
     private fun startFrames() {
         if (frameJob?.isActive == true) return
         frameJob = scope.launch(Dispatchers.Default) {
+            var nullSince: Long? = null
+            var lastNullWarnAt = 0L
             while (isActive && viewers.isNotEmpty()) {
                 val now = System.currentTimeMillis()
                 viewers.entries.removeIf { now - it.value.last > 30_000 }
@@ -159,8 +186,12 @@ class BridgeService : Service() {
                 }
                 val v = ready.values.maxBy { it.fps }
                 val t0 = System.currentTimeMillis()
-                val jpg = try { cap.grabJpeg(v.width, v.quality) } catch (e: Exception) { null }
+                val jpg = try { cap.grabJpeg(v.width, v.quality) } catch (e: Exception) {
+                    Log.w("LiveMobilelty", "grabJpeg", e); null
+                }
                 if (jpg != null) {
+                    nullSince = null
+                    lastNullWarnAt = 0L
                     val b64 = ScreenCapturer.b64(jpg)
                     for ((vid, vv) in ready) {
                         vv.inflight++
@@ -170,6 +201,20 @@ class BridgeService : Service() {
                             .put("jpg", b64)
                             .put("sw", cap.screenW)
                             .put("sh", cap.screenH))
+                    }
+                } else {
+                    // FLAG_SECURE / empty ImageReader: do not stay silent
+                    if (nullSince == null) nullSince = now
+                    val elapsed = now - nullSince!!
+                    if (elapsed >= NULL_FRAME_WARN_MS) {
+                        val due = lastNullWarnAt == 0L || now - lastNullWarnAt >= NULL_FRAME_REPEAT_MS
+                        if (due) {
+                            lastNullWarnAt = now
+                            ready.keys.forEach {
+                                reply(it, JSONObject().put("type", "RD_ERROR").put("error", SECURE_APP_ERROR))
+                            }
+                            setStatus(SECURE_APP_ERROR)
+                        }
                     }
                 }
                 val wait = (1000f / v.fps - (System.currentTimeMillis() - t0)).toLong().coerceAtLeast(0)

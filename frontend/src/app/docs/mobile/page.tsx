@@ -53,7 +53,7 @@ export default function MobileDocs() {
       <ul>
         <li>Android only (API 26+). iOS out of scope.</li>
         <li>~0.3–1 s delay. No phone microphone / speaker audio.</li>
-        <li>Some banking / DRM apps block screen capture (black frames) — that is Android, not us.</li>
+        <li>Some apps (WhatsApp, banking, DRM) set <b>FLAG_SECURE</b> — Android hides their content from screen share. From v1.0.1 the phone sends an <code>RD_ERROR</code> within ~2s instead of staying silent. Leave those apps (Home / switch app) or the laptop will keep seeing the error.</li>
         <li>File transfer phone↔laptop is not in v1 (screen + gestures only).</li>
       </ul>
 
