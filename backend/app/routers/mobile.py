@@ -27,7 +27,7 @@ from ..models import Connector, User
 from ..security import generate_api_key, hash_api_key
 
 router = APIRouter(tags=["mobile"])
-APK_URL = "https://github.com/aabdulrehman/bridgebot-ai/releases/download/live-mobilelty-v1.0.1/live-mobilelty.apk"
+APK_URL = "https://github.com/aabdulrehman/bridgebot-ai/releases/download/live-mobilelty-v1/live-mobilelty.apk"
 CODE_TTL_S = 600
 _codes: Dict[str, Tuple[str, str, float]] = {}     # code -> (raw key, connector id, expiry)
 _fails: Dict[str, list] = {}                        # ip -> recent failure timestamps (brute-force guard)

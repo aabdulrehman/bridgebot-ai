@@ -24,10 +24,9 @@ class BridgeService : Service() {
         const val ACTION_STOP = "com.bridgebot.livemobilelty.STOP"
         const val EXTRA_RESULT_CODE = "rc"
         const val EXTRA_RESULT_DATA = "rd"
-        private const val NULL_FRAME_WARN_MS = 2_000L
-        private const val NULL_FRAME_REPEAT_MS = 10_000L
+        private const val SECURE_WARN_REPEAT_MS = 10_000L
         private const val SECURE_APP_ERROR =
-            "No screen frames — leave secure apps (WhatsApp/banking) or re-allow Screen capture in Live Mobilelty"
+            "Screen looks blank — a secure app (WhatsApp/banking) is open or screen capture was revoked. Go to Home or re-allow Screen capture in Live Mobilelty."
         private const val CAPTURE_STOPPED_ERROR =
             "Screen capture stopped — re-allow in the app"
         @Volatile var running = false
@@ -43,7 +42,8 @@ class BridgeService : Service() {
     private var frameJob: Job? = null
     private var wake: PowerManager.WakeLock? = null
 
-    data class Viewer(var quality: Int, var width: Int, var fps: Float, var inflight: Int = 0, var last: Long = System.currentTimeMillis())
+    data class Viewer(var quality: Int, var width: Int, var fps: Float, var inflight: Int = 0,
+                      var last: Long = System.currentTimeMillis(), var sentAt: Long = 0L)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -172,55 +172,67 @@ class BridgeService : Service() {
     private fun startFrames() {
         if (frameJob?.isActive == true) return
         frameJob = scope.launch(Dispatchers.Default) {
-            var nullSince: Long? = null
-            var lastNullWarnAt = 0L
+            val begun = System.currentTimeMillis()
+            var placeholderSentAt = 0L
+            var lastSecureWarnAt = 0L
+            var lastNoCapWarnAt = 0L
             while (isActive && viewers.isNotEmpty()) {
                 val now = System.currentTimeMillis()
+                // Drop viewers that stopped ACKing for 30s; recover inflight if an ACK was lost (>5s stall).
                 viewers.entries.removeIf { now - it.value.last > 30_000 }
+                viewers.values.forEach { if (it.inflight >= 2 && now - it.sentAt > 5_000) it.inflight = 0 }
                 val ready = viewers.filter { it.value.inflight < 2 }
                 if (ready.isEmpty()) { delay(40); continue }
+
                 val cap = capturer
                 if (cap == null) {
-                    ready.keys.forEach { reply(it, JSONObject().put("type", "RD_ERROR").put("error", "Allow screen capture in the app")) }
-                    delay(1000); continue
+                    if (now - lastNoCapWarnAt >= 3_000) {
+                        lastNoCapWarnAt = now
+                        val ph = ScreenCapturer.b64(ScreenCapturer.placeholderJpeg("Screen capture is off\nOpen Live Mobilelty\nand press Start"))
+                        ready.forEach { (vid, vv) -> sendFrame(vid, vv, ph, 540, 1140, now) }
+                        broadcastError("Allow screen capture in the app")
+                    }
+                    delay(700); continue
                 }
+
                 val v = ready.values.maxBy { it.fps }
                 val t0 = System.currentTimeMillis()
-                val jpg = try { cap.grabJpeg(v.width, v.quality) } catch (e: Exception) {
-                    Log.w("LiveMobilelty", "grabJpeg", e); null
+                val frame = try { cap.grab(v.width, v.quality) } catch (e: Exception) {
+                    Log.w("LiveMobilelty", "grab", e); null
                 }
-                if (jpg != null) {
-                    nullSince = null
-                    lastNullWarnAt = 0L
-                    val b64 = ScreenCapturer.b64(jpg)
-                    for ((vid, vv) in ready) {
-                        vv.inflight++
-                        vv.last = now
-                        reply(vid, JSONObject()
-                            .put("type", "RD_FRAME")
-                            .put("jpg", b64)
-                            .put("sw", cap.screenW)
-                            .put("sh", cap.screenH))
+
+                if (frame != null) {
+                    val b64 = ScreenCapturer.b64(frame.jpg)
+                    for ((vid, vv) in ready) sendFrame(vid, vv, b64, cap.screenW, cap.screenH, now)
+                    // A valid but all-black mirror => a secure window (banking/WhatsApp) is on screen.
+                    if (frame.black && now - lastSecureWarnAt >= SECURE_WARN_REPEAT_MS) {
+                        lastSecureWarnAt = now
+                        ready.keys.forEach { reply(it, JSONObject().put("type", "RD_ERROR").put("error", SECURE_APP_ERROR)) }
                     }
                 } else {
-                    // FLAG_SECURE / empty ImageReader: do not stay silent
-                    if (nullSince == null) nullSince = now
-                    val elapsed = now - nullSince!!
-                    if (elapsed >= NULL_FRAME_WARN_MS) {
-                        val due = lastNullWarnAt == 0L || now - lastNullWarnAt >= NULL_FRAME_REPEAT_MS
-                        if (due) {
-                            lastNullWarnAt = now
-                            ready.keys.forEach {
-                                reply(it, JSONObject().put("type", "RD_ERROR").put("error", SECURE_APP_ERROR))
-                            }
-                            setStatus(SECURE_APP_ERROR)
-                        }
+                    // No image yet. Show a placeholder immediately; escalate to a clear error after 3s.
+                    if (now - placeholderSentAt >= 1_000) {
+                        placeholderSentAt = now
+                        val ph = ScreenCapturer.b64(ScreenCapturer.placeholderJpeg("Starting screen mirror…"))
+                        for ((vid, vv) in ready) sendFrame(vid, vv, ph, 540, 1140, now)
+                    }
+                    if (!cap.everProduced && now - begun >= 3_000 && now - lastSecureWarnAt >= SECURE_WARN_REPEAT_MS) {
+                        lastSecureWarnAt = now
+                        ready.keys.forEach { reply(it, JSONObject().put("type", "RD_ERROR").put("error", SECURE_APP_ERROR)) }
+                        setStatus(SECURE_APP_ERROR)
                     }
                 }
                 val wait = (1000f / v.fps - (System.currentTimeMillis() - t0)).toLong().coerceAtLeast(0)
                 delay(wait)
             }
         }
+    }
+
+    private fun sendFrame(vid: String, vv: Viewer, b64: String, sw: Int, sh: Int, now: Long) {
+        vv.inflight++
+        vv.last = now
+        vv.sentAt = now
+        reply(vid, JSONObject().put("type", "RD_FRAME").put("jpg", b64).put("sw", sw).put("sh", sh))
     }
 
     private fun stopFrames() { frameJob?.cancel(); frameJob = null }

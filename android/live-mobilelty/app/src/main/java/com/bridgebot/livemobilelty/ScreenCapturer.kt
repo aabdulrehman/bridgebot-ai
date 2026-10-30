@@ -3,6 +3,9 @@ package com.bridgebot.livemobilelty
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -24,10 +27,16 @@ class ScreenCapturer(private val ctx: Context) {
     private var callback: MediaProjection.Callback? = null
     var screenW = 0; var screenH = 0; private set
 
-    /**
-     * @param onStopped called on the main thread when the system revokes capture (user stops,
-     *                  another app takes over, etc.). Caller should clear capturer and RD_ERROR viewers.
-     */
+    /** True once at least one real image has been pulled off the VirtualDisplay. */
+    @Volatile var everProduced = false; private set
+    // Cache of the last encoded frame so a *static* screen (ImageReader delivers no new
+    // image until pixels change) keeps streaming instead of being mistaken for "no frames".
+    private var lastJpeg: ByteArray? = null
+    private var lastBlack = false
+
+    /** One grabbed frame. `fresh`=a new image was available; `black`=looks like a blank/secure screen. */
+    data class Frame(val jpg: ByteArray, val fresh: Boolean, val black: Boolean)
+
     fun start(resultCode: Int, data: Intent, onStopped: (() -> Unit)? = null) {
         stop()
         val mpm = ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -54,6 +63,9 @@ class ScreenCapturer(private val ctx: Context) {
         screenW = metrics.widthPixels
         screenH = metrics.heightPixels
         val density = metrics.densityDpi
+        everProduced = false
+        lastJpeg = null
+        lastBlack = false
         reader = ImageReader.newInstance(screenW, screenH, PixelFormat.RGBA_8888, 2)
         display = proj.createVirtualDisplay(
             "LiveMobilelty", screenW, screenH, density,
@@ -62,8 +74,16 @@ class ScreenCapturer(private val ctx: Context) {
         )
     }
 
-    fun grabJpeg(maxWidth: Int, quality: Int): ByteArray? {
-        val img = reader?.acquireLatestImage() ?: return null
+    /**
+     * Returns the newest frame, or the cached last frame when the ImageReader has nothing new
+     * (static screen), or null when we have never produced any image yet.
+     */
+    fun grab(maxWidth: Int, quality: Int): Frame? {
+        val img = reader?.acquireLatestImage()
+        if (img == null) {
+            val lj = lastJpeg ?: return null
+            return Frame(lj, false, lastBlack)   // resend last good frame for static screens
+        }
         try {
             val plane = img.planes[0]
             val buf = plane.buffer
@@ -74,18 +94,38 @@ class ScreenCapturer(private val ctx: Context) {
             bmp.copyPixelsFromBuffer(buf)
             var out = Bitmap.createBitmap(bmp, 0, 0, screenW, screenH)
             bmp.recycle()
+            val black = isMostlyBlack(out)
             if (out.width > maxWidth) {
-                val h = (out.height * (maxWidth.toFloat() / out.width)).toInt()
+                val h = (out.height * (maxWidth.toFloat() / out.width)).toInt().coerceAtLeast(1)
                 val scaled = Bitmap.createScaledBitmap(out, maxWidth, h, true)
                 out.recycle(); out = scaled
             }
             val baos = ByteArrayOutputStream()
             out.compress(Bitmap.CompressFormat.JPEG, quality.coerceIn(10, 90), baos)
             out.recycle()
-            return baos.toByteArray()
+            val bytes = baos.toByteArray()
+            everProduced = true
+            lastJpeg = bytes
+            lastBlack = black
+            return Frame(bytes, true, black)
         } finally {
             img.close()
         }
+    }
+
+    /** Cheap blank/secure-screen heuristic: sample a 7x7 grid; true if every sample is near-black. */
+    private fun isMostlyBlack(bmp: Bitmap): Boolean {
+        val w = bmp.width; val h = bmp.height
+        if (w < 2 || h < 2) return false
+        var n = 0
+        for (i in 1..7) for (j in 1..7) {
+            val x = (w * i / 8).coerceIn(0, w - 1)
+            val y = (h * j / 8).coerceIn(0, h - 1)
+            val p = bmp.getPixel(x, y)
+            if (Color.red(p) > 10 || Color.green(p) > 10 || Color.blue(p) > 10) return false
+            n++
+        }
+        return n > 0
     }
 
     fun stop() {
@@ -98,9 +138,28 @@ class ScreenCapturer(private val ctx: Context) {
         }
         try { proj?.stop() } catch (_: Exception) {}
         display = null; reader = null; projection = null; callback = null
+        lastJpeg = null; lastBlack = false; everProduced = false
     }
 
     companion object {
         fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+        /** A solid placeholder JPEG with centered text, shown before the first real frame arrives. */
+        fun placeholderJpeg(text: String, w: Int = 540, h: Int = 1140): ByteArray {
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(bmp)
+            c.drawColor(Color.rgb(15, 23, 42))
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(203, 213, 225)
+                textSize = w / 22f
+                textAlign = Paint.Align.CENTER
+            }
+            var y = h / 2f - (text.split("\n").size - 1) * p.textSize / 2f
+            for (line in text.split("\n")) { c.drawText(line, w / 2f, y, p); y += p.textSize * 1.4f }
+            val baos = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, 70, baos)
+            bmp.recycle()
+            return baos.toByteArray()
+        }
     }
 }

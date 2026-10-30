@@ -77,6 +77,7 @@ export default function MobilePage() {
         if (imgRef.current) imgRef.current.src = `data:image/jpeg;base64,${m.jpg}`;
         frames.current++;
         setStatus(`Live · ${m.sw}×${m.sh}`);
+        setError(null); // frames are flowing again; drop any stale warning
         ws.send(JSON.stringify({ connector_id: cidRef.current, type: "RD_ACK" }));
       } else if (m.type === "RD_ERROR") setError(String(m.error));
       else if (m.type === "CONNECTOR_STATUS" && m.connector_id === cidRef.current && m.status === "ONLINE") {
